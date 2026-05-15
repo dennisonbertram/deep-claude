@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Resolve symlinks so the script works when installed via symlink (e.g. ~/.local/bin/deep-claude).
+# Resolve symlinks so the script works when installed via symlink (e.g. ~/.local/bin/deep-cco).
 SOURCE="${BASH_SOURCE[0]}"
 while [ -L "$SOURCE" ]; do
   DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
@@ -15,9 +15,12 @@ STATE_DIR="$PROJECT_DIR/.deep-claude-home"
 
 usage() {
   cat <<'EOF'
-Usage: deep-claude [--model pro|flash|MODEL] [claude args...]
+Usage: deep-cco [--model pro|flash|MODEL] [cco/claude args...]
 
-Runs Claude Code against DeepSeek's Anthropic-compatible endpoint.
+Runs Claude Code against DeepSeek's Anthropic-compatible endpoint inside
+nikvdp/cco's sandbox. Shares state with deep-claude (same .env, same
+state dir, same model aliases), so DeepSeek session history is consistent
+whether you launch sandboxed or unsandboxed.
 
 Defaults:
   --model pro     deepseek-v4-pro
@@ -33,7 +36,9 @@ Environment:
     3. macOS Keychain item: service "deep-claude", account "deepseek"
        Add with:
          security add-generic-password -s deep-claude -a deepseek -U -w
-  CLAUDE_BIN may be set to override the claude executable.
+  CCO_BIN may be set to override the cco executable (default: cco).
+
+Requires nikvdp/cco: https://github.com/nikvdp/cco
 EOF
 }
 
@@ -52,24 +57,17 @@ if [[ -z "${DEEPSEEK_API_KEY:-}" ]] && command -v security >/dev/null 2>&1; then
 fi
 
 model="deepseek-v4-pro"
-args=()
+passthrough=()
 
 while (($#)); do
   case "$1" in
-    --)
-      shift
-      while (($#)); do
-        args+=("$1")
-        shift
-      done
-      ;;
     --help|-h)
       usage
       exit 0
       ;;
     --model)
       if (($# < 2)); then
-        echo "deep-claude: --model requires a value: pro, flash, or a full model name" >&2
+        echo "deep-cco: --model requires a value: pro, flash, or a full model name" >&2
         exit 2
       fi
       case "$2" in
@@ -89,7 +87,7 @@ while (($#)); do
       shift
       ;;
     *)
-      args+=("$1")
+      passthrough+=("$1")
       shift
       ;;
   esac
@@ -97,9 +95,15 @@ done
 
 api_key="${DEEPSEEK_API_KEY:-}"
 if [[ -z "$api_key" ]]; then
-  echo "deep-claude: missing DEEPSEEK_API_KEY." >&2
+  echo "deep-cco: missing DEEPSEEK_API_KEY." >&2
   echo "  Set it in the shell, in $ENV_FILE, or store it in macOS Keychain:" >&2
   echo "    security add-generic-password -s deep-claude -a deepseek -U -w" >&2
+  exit 1
+fi
+
+cco_bin="${CCO_BIN:-cco}"
+if ! command -v "$cco_bin" >/dev/null 2>&1; then
+  echo "deep-cco: '$cco_bin' is not on PATH. Install from https://github.com/nikvdp/cco" >&2
   exit 1
 fi
 
@@ -116,8 +120,8 @@ export ANTHROPIC_AUTH_TOKEN="$api_key"
 export ANTHROPIC_API_KEY="$api_key"
 export ANTHROPIC_MODEL="$model"
 
-if ((${#args[@]})); then
-  exec "${CLAUDE_BIN:-claude}" --model "$model" "${args[@]}"
+if ((${#passthrough[@]})); then
+  exec "$cco_bin" --model "$model" "${passthrough[@]}"
 else
-  exec "${CLAUDE_BIN:-claude}" --model "$model"
+  exec "$cco_bin" --model "$model"
 fi
