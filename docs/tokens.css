@@ -1,0 +1,79 @@
+/* Hallmark · macrostructure: Narrative Workflow · F4 step knobs: numbering=1.0/2.0/3.0, layout=vertical-stack, connector=rule-sweep
+ * H9 hero knobs: build=Tier-B hand-SVG (braided streams), animation=draw-in-on-load, scale=dominant-band
+ * nav: N9 edge-aligned (wordmark=serif, cta=text+arrow, padding=spacious) · footer: Ft6 letter-close (signoff=italic, postscript=yes, width=60ch)
+ * theme: custom · vibe: "engraved nautical warmth, braided archival cream" · paper: oklch(95.5% 0.016 85) · accent: oklch(63% 0.12 42)
+ * display: Newsreader · body: Source Serif 4 · outlier: JetBrains Mono (code role only)
+ * axes: light / roman-serif / chromatic-terracotta · genre: editorial · enrichment: Tier-B hand-SVG
+ * studied: no · context: inferred (autonomous brief) · Hallmark pre-emit critique: P5 H5 E4 S5 R4 V5
+ * contrast: pass (46–50) · slop: pass (51–55) · honest: pass (56) · chrome: pass (57) · tokens: pass (58)
+ * responsive: pass (59) · icons: pass (60) · mobile: pass (36, 59, 61–69)
+ */
+
+:root {
+  /* — colour · cream paper, slate ink, terracotta accent (banner DNA) — */
+  --color-paper:       oklch(95.5% 0.016 85);
+  --color-paper-2:     oklch(92.5% 0.018 82);
+  --color-ink:         oklch(27% 0.025 255);
+  --color-ink-2:       oklch(38% 0.022 252);
+  --color-muted:       oklch(44% 0.02 250);
+  --color-rule:        oklch(84% 0.018 75);
+  --color-rule-2:      oklch(88% 0.016 80);
+  --color-accent:      oklch(63% 0.12 42);   /* terracotta — strokes, bars, marks  */
+  --color-accent-text: oklch(45% 0.11 38);   /* terracotta dark enough for text    */
+  --color-focus:       oklch(52% 0.18 40);
+  --color-slate:       oklch(46% 0.05 250);  /* slate dark enough for text + bars  */
+
+  /* — the six strands of the braid (banner palette) — */
+  --stream-1: oklch(63% 0.12 42);
+  --stream-2: oklch(70% 0.105 48);
+  --stream-3: oklch(54% 0.115 35);
+  --stream-4: oklch(78% 0.07 65);
+  --stream-5: oklch(58% 0.045 250);
+  --stream-6: oklch(68% 0.038 248);
+
+  /* — type — */
+  --font-display: "Newsreader", ui-serif, "Iowan Old Style", Georgia, serif;
+  --font-body:    "Source Serif 4", ui-serif, Georgia, serif;
+  --font-mono:    "JetBrains Mono", ui-monospace, "SF Mono", monospace;
+
+  /* — scale · major third (1.25) — */
+  --text-xs:   0.8rem;
+  --text-sm:   0.875rem;
+  --text-base: 1.0625rem;
+  --text-md:   1.25rem;
+  --text-lg:   1.5625rem;
+  --text-xl:   1.953rem;
+  --text-2xl:  2.441rem;
+  --text-3xl:  3.052rem;
+  --text-display: clamp(2.75rem, 5vw + 1rem, 5.25rem);
+
+  /* — space · 4 pt — */
+  --space-2xs: 0.25rem;
+  --space-xs:  0.5rem;
+  --space-sm:  0.75rem;
+  --space-md:  1rem;
+  --space-lg:  1.5rem;
+  --space-xl:  2.5rem;
+  --space-2xl: 4rem;
+  --space-3xl: 6rem;
+  --space-4xl: 9rem;
+
+  /* — motion — */
+  --ease-out:    cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in:     cubic-bezier(0.7, 0, 0.84, 0);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-micro: 120ms;
+  --dur-short: 220ms;
+  --dur-long:  420ms;
+
+  /* — chrome — */
+  --rule-hairline: 1px;
+  --rule-heavy: 3px;
+  --page-gutter: clamp(1.25rem, 5vw, 4rem);
+  --measure: 62ch;
+
+  /* — z — */
+  --z-base: 1;
+  --z-raised: 10;
+  --z-sticky: 200;
+}

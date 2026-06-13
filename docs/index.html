@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>deep-claude — drive Claude Code with DeepSeek's V4 models</title>
+<meta name="description" content="Two thin wrappers that point Claude Code at DeepSeek's Anthropic-compatible V4 models, with state cleanly isolated from your real Anthropic login — and an optional OS sandbox. Keep the harness; swap the brain.">
+<meta name="theme-color" content="#f2eee2">
+<link rel="canonical" href="https://dennisonbertram.github.io/deep-claude/">
+<meta property="og:type" content="website">
+<meta property="og:title" content="deep-claude — drive Claude Code with DeepSeek's V4 models">
+<meta property="og:description" content="Keep the Claude Code harness you love. Put DeepSeek V4 behind it. Cleanly isolated, optionally sandboxed.">
+<meta property="og:image" content="https://dennisonbertram.github.io/deep-claude/assets/thumbnail.jpg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:url" content="https://dennisonbertram.github.io/deep-claude/">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🐋%3C/text%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400..600;1,6..72,400..600&family=Source+Serif+4:ital,opsz,wght@0,8..60,400..600;1,8..60,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="tokens.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to the story</a>
+
+<header class="nav-edge">
+  <a class="wordmark" href="#top">deep-claude</a>
+  <a class="link" href="https://github.com/dennisonbertram/deep-claude">GitHub&nbsp;↗</a>
+</header>
+
+<section class="hero" id="top">
+  <div class="hero__inner">
+    <h1 class="reveal" style="--i:0">A different mind. The <em>same</em> harness.</h1>
+    <p class="hero__lede reveal" style="--i:1"><code>deep-claude</code> points <a href="https://claude.com/claude-code">Claude&nbsp;Code</a> at DeepSeek's V4 models and redirects its state into a private home — so you get the full agentic harness on a different model, and your real Anthropic login is never touched.</p>
+    <p class="hero__actions reveal" style="--i:2">
+      <a class="link" href="#stage-setup">Jump to install&nbsp;↓</a>
+      <a class="link" href="https://github.com/dennisonbertram/deep-claude">View on GitHub&nbsp;↗</a>
+    </p>
+  </div>
+
+  <figure class="banner reveal" style="--i:3">
+    <img src="assets/banner.png" alt="A whale diving deep through classical sea-wave patterns, rendered in ink-wash brushwork on warm cream paper." width="1536" height="1024">
+    <figcaption>Dive deep. Keep your bearings.</figcaption>
+  </figure>
+</section>
+
+<main id="main">
+  <ol class="stages">
+
+    <li class="stage" id="stage-idea">
+      <hr class="stage__rule" aria-hidden="true">
+      <h2><span class="stage__num">1.0</span>The idea.</h2>
+      <div class="prose">
+        <p>Claude&nbsp;Code is one of the best agentic coding harnesses there is — but the planning loop, tool use, MCP servers, sub-agents, permissions, and slash commands are all <em>harness</em>, not <em>model</em>. DeepSeek's V4 models speak the Anthropic API, so you can keep every bit of that machinery and just swap the brain.</p>
+        <p>That means real workflows, not just chat: multi-step edits, test loops, MCP tools, and sub-agents all drive the same agent loop you already know — now thinking with DeepSeek&nbsp;V4. <code>v4-pro</code> is sharp on reasoning and long-context refactors; <code>flash</code> is fast and cheap for triage and bulk passes.</p>
+      </div>
+    </li>
+
+    <li class="stage" id="stage-isolation">
+      <hr class="stage__rule" aria-hidden="true">
+      <h2><span class="stage__num">2.0</span>The isolation.</h2>
+      <div class="prose">
+        <p>The friction was never the API — it's that a second model would collide with your normal Anthropic-authed Claude&nbsp;Code: shared session history, shared MCP config, shared <code>~/.claude.json</code>. <code>deep-claude</code> sidesteps all of it. On each launch it sets four environment variables and redirects <code>$HOME</code> plus the XDG config / cache / data / state dirs into a private folder beside the repo:</p>
+        <ol>
+          <li>points <code>ANTHROPIC_BASE_URL</code> at <code>api.deepseek.com/anthropic</code>,</li>
+          <li>passes your <code>DEEPSEEK_API_KEY</code> through as the auth token,</li>
+          <li>selects the model (<code>deepseek-v4-pro</code> by default), and</li>
+          <li>redirects <code>$HOME</code> into <code>.deep-claude-home/</code>, so all of Claude&nbsp;Code's state lives there instead of in your real <code>~/.claude/</code>.</li>
+        </ol>
+      </div>
+      <aside class="aside-note">
+        <p class="aside-note__head">Your normal setup is safe.</p>
+        <p>The wrappers only flip environment variables per launch. Your Anthropic credentials are never read, copied, or modified — your everyday Claude&nbsp;Code stays exactly as it was.</p>
+      </aside>
+    </li>
+
+    <li class="stage" id="stage-setup">
+      <hr class="stage__rule" aria-hidden="true">
+      <h2><span class="stage__num">3.0</span>The setup.</h2>
+      <div class="prose">
+        <p>Three lines to install. <code>install.sh</code> symlinks <code>deep-claude</code> and <code>deep-cco</code> into <code>~/.local/bin</code> — make sure that's on your <code>PATH</code>.</p>
+      </div>
+      <div class="codeblock">
+        <div class="codeblock__bar">
+          <span class="codeblock__label">sh</span>
+          <button class="copy-btn" type="button" data-copy="install-sh" aria-live="polite">Copy</button>
+        </div>
+        <pre id="install-sh"><code>git clone https://github.com/dennisonbertram/deep-claude
+cd deep-claude
+./install.sh   <span class="c"># symlinks deep-claude + deep-cco into ~/.local/bin</span></code></pre>
+      </div>
+      <div class="prose">
+        <p>Then give it a <a href="https://platform.deepseek.com/">DeepSeek API key</a>. On macOS the Keychain is the clean path — the key never lives in <code>.env</code>, shell history, or process listings. (A shell <code>export</code> or a <code>.env</code> file work too.)</p>
+      </div>
+      <div class="codeblock">
+        <div class="codeblock__bar">
+          <span class="codeblock__label">sh</span>
+          <button class="copy-btn" type="button" data-copy="key-sh" aria-live="polite">Copy</button>
+        </div>
+        <pre id="key-sh"><code>security add-generic-password -s deep-claude -a deepseek -U -w
+<span class="c"># paste the key, then return — click "Always Allow" the first time</span></code></pre>
+      </div>
+    </li>
+
+    <li class="stage" id="stage-run">
+      <hr class="stage__rule" aria-hidden="true">
+      <h2><span class="stage__num">4.0</span>The run.</h2>
+      <div class="prose">
+        <p>From here on, type <code>deep-claude</code> wherever you typed <code>claude</code>. Everything except <code>--model</code> passes straight through — flags, prompts, <code>--resume</code>, all of it. The harness is identical; only the model behind it has changed.</p>
+      </div>
+      <div class="codeblock">
+        <div class="codeblock__bar">
+          <span class="codeblock__label">console</span>
+        </div>
+        <pre><code>$ deep-claude
+<span class="o">…interactive session on deepseek-v4-pro (default)…</span>
+
+$ deep-claude <span class="a">--model flash</span> -p "triage these failing tests"
+<span class="o">…the agent loop, on the faster deepseek-v4-flash…</span></code></pre>
+      </div>
+      <div class="prose">
+        <p>Two model aliases, plus the full names when you want them:</p>
+      </div>
+      <dl class="policies">
+        <dt>pro<span class="default-tag">— the default</span></dt>
+        <dd><code>deepseek-v4-pro</code> — strongest reasoning, refactors, long context.</dd>
+        <dt>flash</dt>
+        <dd><code>deepseek-v4-flash</code> — fast and cheap for triage, scripting, bulk passes.</dd>
+      </dl>
+      <div class="prose">
+        <p style="margin-top: var(--space-lg)">The wrapper eats <code>--model X</code> itself; use <code>--</code> to be explicit when <code>claude</code>'s own flags overlap — <code>deep-claude --model flash -- -p "hello"</code> is unambiguous.</p>
+      </div>
+    </li>
+
+    <li class="stage" id="stage-sandbox">
+      <hr class="stage__rule" aria-hidden="true">
+      <h2><span class="stage__num">5.0</span>The sandbox.</h2>
+      <div class="prose">
+        <p>Letting an agent run with <code>--dangerously-skip-permissions</code> is wonderful right up until a prompt injection points it at your <code>$HOME</code>. <code>deep-cco</code> is the same wrapper, but everything runs inside <a href="https://github.com/nikvdp/cco">cco</a>'s OS sandbox — Seatbelt on macOS, bubblewrap on Linux, Docker as a fallback. Same DeepSeek session history, walled off from the rest of your machine.</p>
+      </div>
+      <div class="codeblock">
+        <div class="codeblock__bar">
+          <span class="codeblock__label">console</span>
+        </div>
+        <pre><code>$ deep-cco --model flash -p "refactor this module and run the tests"
+<span class="s">◆ sandboxed</span>  deepseek-v4-flash · cco
+<span class="o">…full autonomy inside the sandbox, your $HOME untouched…</span>
+
+$ deep-cco --safe -p "hi"   <span class="c"># cco's tighter sandbox — hides $HOME</span></code></pre>
+      </div>
+      <div class="prose">
+        <p><code>--model</code> is consumed locally; everything else flows to <code>cco</code> and then to <code>claude</code>. Both wrappers share the same <code>.deep-claude-home/</code>, so your DeepSeek history is consistent whether you run sandboxed or not.</p>
+      </div>
+    </li>
+  </ol>
+
+  <section class="aboard" id="why">
+    <div class="aboard__inner">
+      <h2 class="section-head">Why run it.</h2>
+      <p class="section-sub">Five reasons to keep the harness and swap the model.</p>
+
+      <div class="aboard-row">
+        <h3>Real workflows, not just chat.<small>multi-step · MCP · sub-agents</small></h3>
+        <div>
+          <p>Planning, editing, running tests, calling MCP tools, spawning sub-agents — the entire Claude&nbsp;Code agent loop works, now driven by DeepSeek&nbsp;V4. You're not dropping to a chat box; you're running the same autonomous coding sessions with a different model at the wheel.</p>
+        </div>
+      </div>
+
+      <div class="aboard-row">
+        <h3>Genuinely strong at code.<small>v4-pro · v4-flash</small></h3>
+        <div>
+          <p>V4-pro holds its own on reasoning, refactors, and long-context work; <code>flash</code> is quick and inexpensive for triage, scripting, and bulk passes. Pick the model to fit the job without leaving the tool.</p>
+        </div>
+      </div>
+
+      <div class="aboard-row">
+        <h3>Cost-effective by the token.<small>DeepSeek API rates</small></h3>
+        <div>
+          <p>Pay DeepSeek's API rates for heavy autonomous runs and long agent loops, while keeping your Anthropic subscription pristine for everything else. Route the expensive, exploratory work where it's cheapest.</p>
+        </div>
+      </div>
+
+      <div class="aboard-row">
+        <h3>Zero contamination.<small>.deep-claude-home/</small></h3>
+        <div>
+          <p>Session history, projects, MCP config, and <code>~/.claude.json</code> all live in a private home beside the repo. Your normal Claude&nbsp;Code setup is untouched — switch models without switching context, and without cross-talk.</p>
+        </div>
+      </div>
+
+      <div class="aboard-row">
+        <h3>Sandbox on demand.<small>deep-cco</small></h3>
+        <div>
+          <p>One command runs the whole thing inside a real OS sandbox via <a href="https://github.com/nikvdp/cco">cco</a>, so you can hand an agent <code>--dangerously-skip-permissions</code> without handing it your <code>$HOME</code>. Namespace isolation survives the sandboxing layer.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="reference" id="reference">
+    <div class="reference__inner">
+      <h2 class="section-head">The reference.</h2>
+      <p class="section-sub">The whole surface. Anything <code>deep-claude</code> doesn't recognize belongs to <code>claude</code>.</p>
+
+      <table class="spec-sheet">
+        <thead><tr><th colspan="2">Run</th></tr></thead>
+        <tbody>
+          <tr><th scope="row">deep-claude [args…]</th><td>Run <code>claude</code> against DeepSeek with isolated state.</td></tr>
+          <tr><th scope="row">deep-claude --model pro·flash</th><td>Pick the model — <code>pro</code> (default) or <code>flash</code>. Full names work too.</td></tr>
+          <tr><th scope="row">deep-cco [args…]</th><td>Same, inside <a href="https://github.com/nikvdp/cco">cco</a>'s OS sandbox.</td></tr>
+          <tr><th scope="row">deep-cco --safe</th><td>cco's tighter sandbox — hides <code>$HOME</code>.</td></tr>
+          <tr><th scope="row">… -- [args…]</th><td><code>--</code> ends the wrapper's flags; everything after belongs to <code>claude</code> (or <code>cco</code>).</td></tr>
+        </tbody>
+      </table>
+
+      <table class="spec-sheet">
+        <thead><tr><th colspan="2">Configure</th></tr></thead>
+        <tbody>
+          <tr><th scope="row">DEEPSEEK_API_KEY</th><td>Shell env — checked first.</td></tr>
+          <tr><th scope="row">.env</th><td><code>cp .env.example .env</code> and set the key (gitignored).</td></tr>
+          <tr><th scope="row">macOS Keychain</th><td><code>security add-generic-password -s deep-claude -a deepseek -U -w</code> — recommended.</td></tr>
+          <tr><th scope="row">CLAUDE_BIN</th><td>Override the <code>claude</code> executable used by <code>deep-claude</code>.</td></tr>
+          <tr><th scope="row">CCO_BIN</th><td>Override the <code>cco</code> executable used by <code>deep-cco</code>.</td></tr>
+        </tbody>
+      </table>
+
+      <table class="spec-sheet">
+        <thead><tr><th colspan="2">Under the hood</th></tr></thead>
+        <tbody>
+          <tr><th scope="row">ANTHROPIC_BASE_URL</th><td><code>https://api.deepseek.com/anthropic</code></td></tr>
+          <tr><th scope="row">ANTHROPIC_AUTH_TOKEN</th><td>Your <code>DEEPSEEK_API_KEY</code>.</td></tr>
+          <tr><th scope="row">ANTHROPIC_MODEL</th><td>The selected DeepSeek model.</td></tr>
+          <tr><th scope="row">HOME → .deep-claude-home/</th><td>Redirected per launch; isolates all of Claude&nbsp;Code's state.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="cta-close" id="install">
+    <div class="cta-close__inner">
+      <h2 class="section-head">Keep the harness. Swap the brain.</h2>
+      <div class="codeblock">
+        <div class="codeblock__bar">
+          <span class="codeblock__label">sh</span>
+          <button class="copy-btn" type="button" data-copy="cta-sh" aria-live="polite">Copy</button>
+        </div>
+        <pre id="cta-sh"><code>git clone https://github.com/dennisonbertram/deep-claude &amp;&amp; cd deep-claude &amp;&amp; ./install.sh</code></pre>
+      </div>
+      <p class="cta-close__links">
+        <a class="link" href="https://github.com/dennisonbertram/deep-claude">View on GitHub&nbsp;↗</a>
+        <a class="link" href="https://github.com/dennisonbertram/deep-claude#readme">Read the README&nbsp;↗</a>
+      </p>
+    </div>
+  </section>
+</main>
+
+<footer class="foot-letter">
+  <div class="foot-letter__inner">
+    <hr class="foot-letter__rule">
+    <p class="foot-letter__close">Dive deep,<br><span class="foot-letter__sign">— Dennison</span></p>
+    <p class="foot-letter__ps">P.S. — Open source under <a href="https://github.com/dennisonbertram/deep-claude/blob/main/LICENSE">MIT</a>. Not affiliated with Anthropic or DeepSeek — “Claude” and “Claude&nbsp;Code” are trademarks of Anthropic; “DeepSeek” is a trademark of its respective owner. Letters back are welcome <a href="https://github.com/dennisonbertram/deep-claude/issues">in the issues</a>.</p>
+  </div>
+</footer>
+
+<script>
+(function () {
+  document.documentElement.classList.add("js");
+
+  /* one-shot stage rule sweep — desktop, motion-permitting */
+  var stages = document.querySelectorAll(".stage");
+  var wantsMotion = window.matchMedia("(prefers-reduced-motion: no-preference)").matches;
+  var wideEnough = window.matchMedia("(min-width: 40rem)").matches;
+  if (wantsMotion && wideEnough && "IntersectionObserver" in window) {
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (e) {
+        if (e.isIntersecting) {
+          e.target.classList.add("is-seen");
+          io.unobserve(e.target);
+        }
+      });
+    }, { rootMargin: "0px 0px -12% 0px" });
+    stages.forEach(function (s) { io.observe(s); });
+  } else {
+    stages.forEach(function (s) { s.classList.add("is-seen"); });
+  }
+
+  /* copy-to-clipboard — label swap is the feedback, no toast */
+  document.querySelectorAll(".copy-btn").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var src = document.getElementById(btn.dataset.copy);
+      if (!src) return;
+      var text = src.innerText.replace(/^\$\s/gm, "");
+      navigator.clipboard.writeText(text).then(function () {
+        btn.dataset.state = "copied";
+        btn.textContent = "Copied ✓";
+        setTimeout(function () {
+          delete btn.dataset.state;
+          btn.textContent = "Copy";
+        }, 2500);
+      }).catch(function () {
+        btn.dataset.state = "error";
+        btn.textContent = "Select & copy";
+        setTimeout(function () {
+          delete btn.dataset.state;
+          btn.textContent = "Copy";
+        }, 3000);
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,8 +1,59 @@
-# deep-claude
+<p align="center">
+  <img src="assets/banner.png" alt="deep-claude" width="100%">
+</p>
 
-> Run [Claude Code](https://claude.com/claude-code) against DeepSeek's V4 models without polluting your normal Claude Code setup. Optionally sandboxed.
+<h1 align="center">deep-claude 🐋</h1>
 
-DeepSeek exposes its V4 models behind an Anthropic-compatible API, so a few environment variables are enough to point Claude Code at it. The friction is keeping state from colliding with your normal Anthropic-authed Claude Code, and (optionally) sandboxing an agent you're running with `--dangerously-skip-permissions`. This repo handles both.
+<p align="center">
+  <b>Drive Claude Code with DeepSeek's V4 models.</b><br>
+  Same harness you already love. A different mind behind it. Cleanly isolated, optionally sandboxed.
+</p>
+
+<p align="center">
+  <a href="https://dennisonbertram.github.io/deep-claude/">Website</a> ·
+  <a href="#quickstart">Install</a> ·
+  <a href="#usage">Usage</a> ·
+  <a href="#configuring-the-api-key">API key</a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="#troubleshooting">Troubleshooting</a>
+</p>
+
+<p align="center">
+  <code>deep-claude</code> points <a href="https://claude.com/claude-code">Claude Code</a> at DeepSeek's
+  Anthropic-compatible endpoint and redirects its state into a private home, so your real
+  Anthropic login is never touched. Type <code>deep-claude</code> followed by any normal
+  <code>claude</code> arguments and you get the full agentic harness — tools, MCP, slash
+  commands, sub-agents, the works — running on <code>deepseek-v4-pro</code>.
+</p>
+
+```console
+$ deep-claude -p "refactor this module and run the tests"
+…the Claude Code agent loop you know — planning, editing, running — on DeepSeek V4…
+
+$ deep-cco --model flash -p "triage these failing tests"
+…same thing, sandboxed, on the faster flash model…
+```
+
+## Why run DeepSeek in the Claude harness?
+
+Claude Code is one of the best agentic coding harnesses there is: the planning loop, tool
+use, MCP servers, sub-agents, permissions, and slash commands are all _harness_, not
+_model_. DeepSeek's V4 models speak the Anthropic API, so you can keep every bit of that
+machinery and just swap the brain.
+
+- **Run real workflows, not just chat.** Multi-step edits, test loops, MCP tools, and
+  sub-agents all work — DeepSeek V4 drives the same agent loop Claude Code gives you.
+- **Genuinely strong at code.** V4-pro is sharp on reasoning, refactors, and long-context
+  work; `flash` is fast and cheap for triage, scripting, and bulk passes.
+- **Cost-effective.** Pay DeepSeek's API rates for heavy autonomous runs while keeping your
+  Anthropic subscription pristine for everything else.
+- **Zero contamination.** Session history, projects, MCP config, and `~/.claude.json` live
+  in a private `.deep-claude-home/` — your normal Claude Code setup is untouched.
+- **Sandbox on demand.** `deep-cco` runs the whole thing inside a real OS sandbox, so you
+  can hand an agent `--dangerously-skip-permissions` without handing it your `$HOME`.
+
+> **Your normal setup is safe.** The wrappers only set a few environment variables and
+> redirect `$HOME` per launch. They never read, move, or modify your Anthropic credentials.
 
 Two thin Bash wrappers:
 
