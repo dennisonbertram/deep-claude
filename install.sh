@@ -21,6 +21,6 @@ Make sure this directory is on your PATH:
 Then run:
   deep-claude                          # DeepSeek
   deep-cco                             # sandboxed via cco
-  deep-router models add google/gemini-3-flash gemini
-  deep-claude --open-router --model gemini   # Claude Code on OpenRouter
+  deep-router pick                     # choose OpenRouter models (interactive)
+  deep-claude --open-router            # Claude Code on your chosen OpenRouter model
 EOF
