@@ -28,16 +28,47 @@ ENV_FILE="${DEEP_ROUTER_ENV_FILE:-$PROJECT_DIR/.env}"
 usage() {
   cat <<'EOF'
 Usage:
+  deep-router pick                                   interactive model picker
   deep-router models list
   deep-router models add <openrouter/model-id> [alias]
   deep-router models remove <id|alias>
   deep-router models default <alias|id>
   deep-router serve
 
+`pick` opens a searchable, multi-select chooser over OpenRouter's catalog.
 `add`/`remove`/`default` edit the curated set in .env (ROUTER_MODELS,
 ROUTER_ALIASES, ROUTER_DEFAULT_MODEL). Then launch with:
   deep-claude --open-router --model <alias>
 EOF
+}
+
+# Resolve the OpenRouter key from env, the .env file, or macOS Keychain.
+resolve_openrouter_key() {
+  local key="${OPENROUTER_API_KEY:-}"
+  [[ "$key" == "sk-or-..." ]] && key=""
+  if [[ -z "$key" ]]; then
+    key="$(env_get OPENROUTER_API_KEY)"
+    [[ "$key" == "sk-or-..." ]] && key=""
+  fi
+  if [[ -z "$key" ]] && command -v security >/dev/null 2>&1; then
+    key="$(security find-generic-password -s deep-router -a openrouter -w 2>/dev/null || true)"
+  fi
+  printf '%s' "$key"
+}
+
+run_pick() {
+  command -v node >/dev/null 2>&1 || {
+    echo "deep-router: node is required for the picker" >&2
+    exit 1
+  }
+  local key
+  key="$(resolve_openrouter_key)"
+  if [[ -z "$key" ]]; then
+    echo "deep-router: missing OPENROUTER_API_KEY (env, .env, or Keychain -s deep-router -a openrouter)" >&2
+    exit 1
+  fi
+  OPENROUTER_API_KEY="$key" DEEP_ROUTER_ENV_FILE="$ENV_FILE" \
+    exec node "$SCRIPT_DIR/deep-router-pick"
 }
 
 # --- .env get/set (pure bash, comma-list aware) ----------------------------
@@ -194,11 +225,15 @@ case "$cmd" in
   serve | "")
     exec node "$SCRIPT_DIR/deep-router-proxy" "$@"
     ;;
+  pick)
+    run_pick
+    ;;
   models)
     sub="${1:-list}"
     [[ $# -gt 0 ]] && shift || true
     case "$sub" in
       list) models_list ;;
+      pick) run_pick ;;
       add) models_add "${1:-}" "${2:-}" ;;
       remove | rm) models_remove "${1:-}" ;;
       default) models_default "${1:-}" ;;

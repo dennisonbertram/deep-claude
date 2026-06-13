@@ -11,6 +11,7 @@ bash -n deep-cco
 bash -n deep-router
 bash -n install.sh
 node --check bin/deep-router-proxy
+node --check bin/deep-router-pick
 
 default_output="$(CLAUDE_BIN=/bin/echo ./bin/deep-claude)"
 flash_output="$(CLAUDE_BIN=/bin/echo ./bin/deep-claude --model flash hello)"

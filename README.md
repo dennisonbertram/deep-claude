@@ -191,7 +191,23 @@ security add-generic-password -s deep-router -a openrouter -U -w   # macOS Keych
 # …or put OPENROUTER_API_KEY=sk-or-... in .env
 ```
 
-Curate the models you want to expose:
+Curate the models you want to expose. The easiest way is the interactive picker — a searchable, multi-select chooser over OpenRouter's whole catalog (with context windows and pricing), which writes your selection, auto-aliases, and default to `.env`:
+
+```bash
+deep-router pick
+```
+
+```
+  Select models to expose  (these appear in Claude Code’s /model picker)
+  17/337 models  ·  2 selected
+  search: gemini▏
+
+  ◉ google/gemini-2.5-flash      1.0M  $0.30/$2.50   Google: Gemini 2.5 Flash
+> ◉ google/gemini-2.5-pro        1.0M  $1.25/$10     Google: Gemini 2.5 Pro
+    ↑/↓ move · space select · type to search · ↵ confirm · esc cancel
+```
+
+Or edit the set non-interactively:
 
 ```bash
 deep-router models add google/gemini-3.5-flash      gemini
@@ -251,8 +267,9 @@ ANTHROPIC_MODEL=<selected model>
 | -------------------------- | ------------------------------------------------------------------------ |
 | `bin/deep-claude`          | The wrapper script (DeepSeek, or OpenRouter with `--open-router`)        |
 | `bin/deep-cco`             | The sandboxed wrapper                                                    |
-| `bin/deep-router`          | Curation CLI (`models add/remove/list/default`) + `serve`               |
+| `bin/deep-router`          | Curation CLI (`pick`, `models add/remove/list/default`, `serve`)        |
 | `bin/deep-router-proxy`    | The Node Anthropic→OpenRouter passthrough proxy                          |
+| `bin/deep-router-pick`     | The Node interactive model picker (`deep-router pick`)                   |
 | `deep-claude`, `deep-cco`, `deep-router` | Top-level shims that `exec bin/...`                        |
 | `install.sh`               | Symlinks `deep-claude`, `deep-cco`, `deep-router` into `~/.local/bin`    |
 | `test.sh`                  | Syntax, arg-passthrough, and live proxy tests                            |
