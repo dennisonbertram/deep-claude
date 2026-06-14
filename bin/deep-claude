@@ -31,6 +31,7 @@ usage() {
   cat <<'EOF'
 Usage:
   deep-claude [--model ALIAS|ID] [claude args...]      run on OpenRouter (default)
+  deep-claude cli                                      first-run setup wizard (key + models)
   deep-claude pick                                     pick OpenRouter models (TUI)
   deep-claude models <add|remove|list|default> ...     curate the OpenRouter set
   deep-claude endpoints <add|remove|list> ...          manage personal endpoints
@@ -276,6 +277,30 @@ run_pick() {
   OPENROUTER_API_KEY="$key" DEEP_CLAUDE_ENV_FILE="$ENV_FILE" exec node "$SCRIPT_DIR/deep-claude-pick"
 }
 
+# The setup wizard (key entry + model picker). Runs in the foreground and
+# returns, so callers can reload .env and continue.
+run_cli() {
+  command -v node >/dev/null 2>&1 || { echo "deep-claude: node is required for setup" >&2; exit 1; }
+  local key; key="$(resolve_openrouter_key)"
+  OPENROUTER_API_KEY="$key" DEEP_CLAUDE_ENV_FILE="$ENV_FILE" node "$SCRIPT_DIR/deep-claude-cli"
+}
+
+# Resolve a raw model token (alias name, full id, or empty) into an OpenRouter
+# model id, consulting ROUTER_ALIASES and ROUTER_DEFAULT_MODEL.
+resolve_router_model() {
+  local m="$1" aliases p
+  [[ -z "$m" ]] && m="$(env_get ROUTER_DEFAULT_MODEL)"
+  aliases="$(env_get ROUTER_ALIASES)"
+  if [[ -n "$aliases" ]]; then
+    IFS=',' read -ra prs <<<"$aliases"
+    for p in ${prs[@]+"${prs[@]}"}; do
+      p="${p// /}"; [[ -z "$p" ]] && continue
+      [[ "${p%%=*}" == "$m" ]] && { m="${p#*=}"; break; }
+    done
+  fi
+  printf '%s' "$m"
+}
+
 # Point Claude Code's state at our isolated home without touching $HOME (the
 # macOS login keychain lives under $HOME/Library/Keychains).
 set_claude_state() {
@@ -289,34 +314,28 @@ set_claude_state() {
 
 # --- run: OpenRouter (default) ----------------------------------------------
 run_openrouter() {
-  local model="$1"; shift
+  local req_model="$1"; shift
   local args=("$@")
 
+  command -v node >/dev/null 2>&1 || { echo "deep-claude: node is required for OpenRouter mode" >&2; exit 1; }
+
+  # First run (no key yet): launch the setup wizard, then carry on.
   local key; key="$(resolve_openrouter_key)"
   if [[ -z "$key" ]]; then
-    echo "deep-claude: missing OPENROUTER_API_KEY." >&2
-    echo "  Set it in the shell, in $ENV_FILE, or store it in macOS Keychain:" >&2
-    echo "    security add-generic-password -s deep-router -a openrouter -U -w" >&2
-    exit 1
+    run_cli
+    load_env
+    key="$(resolve_openrouter_key)"
+    [[ -z "$key" ]] && { echo "deep-claude: setup didn't complete — no OpenRouter key." >&2; exit 1; }
   fi
 
-  # Resolve the model: a ROUTER_ALIASES name, a full id, or ROUTER_DEFAULT_MODEL.
-  [[ -z "$model" ]] && model="$(env_get ROUTER_DEFAULT_MODEL)"
-  local aliases p
-  aliases="$(env_get ROUTER_ALIASES)"
-  if [[ -n "$aliases" ]]; then
-    IFS=',' read -ra prs <<<"$aliases"
-    for p in ${prs[@]+"${prs[@]}"}; do
-      p="${p// /}"; [[ -z "$p" ]] && continue
-      [[ "${p%%=*}" == "$model" ]] && { model="${p#*=}"; break; }
-    done
-  fi
+  # Resolve the model; if none is curated yet, run the wizard (picker) once.
+  local model; model="$(resolve_router_model "$req_model")"
   if [[ -z "$model" ]]; then
-    echo "deep-claude: no model selected. Pass --model NAME, or run 'deep-claude pick'." >&2
-    exit 1
+    run_cli
+    load_env
+    model="$(resolve_router_model "$req_model")"
+    [[ -z "$model" ]] && { echo "deep-claude: no model selected. Run 'deep-claude pick'." >&2; exit 1; }
   fi
-
-  command -v node >/dev/null 2>&1 || { echo "deep-claude: node is required for OpenRouter mode" >&2; exit 1; }
 
   local port="${ROUTER_PORT:-8787}" host="${ROUTER_HOST:-127.0.0.1}"
   ROUTER_PORT="$port" ROUTER_HOST="$host" OPENROUTER_API_KEY="$key" \
@@ -406,6 +425,7 @@ run_main() {
 # --- top-level dispatch -----------------------------------------------------
 load_env
 case "${1:-}" in
+  cli | setup) shift; run_cli ;;
   pick) shift; run_pick ;;
   models) shift; models_dispatch "$@" ;;
   endpoints) shift; endpoints_dispatch "$@" ;;

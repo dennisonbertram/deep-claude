@@ -60,8 +60,9 @@ swap the brain.
 
 | Command                       | What it does                                                  |
 | ----------------------------- | ------------------------------------------------------------ |
-| `deep-claude`                 | Run Claude Code on your default OpenRouter model.            |
+| `deep-claude`                 | Run Claude Code on your default model (first run: setup wizard). |
 | `deep-claude --model X`       | Run on a specific model (alias or full id) for this session. |
+| `deep-claude cli`             | The setup wizard — enter your key and pick models.           |
 | `deep-claude pick`            | Interactive model picker over OpenRouter's catalog.          |
 | `deep-claude models …`        | Curate the model set non-interactively.                      |
 | `deep-claude endpoints …`     | Manage personal (non-OpenRouter) endpoints.                  |
@@ -94,19 +95,13 @@ cd deep-claude
 export PATH="$HOME/.local/bin:$PATH"     # if it isn't already
 ```
 
-Store your OpenRouter key (Keychain recommended on macOS; `.env` or shell env also work):
+Then just run it — the **first run walks you through setup** (enter your [OpenRouter key](https://openrouter.ai/keys), then pick your models):
 
 ```bash
-security add-generic-password -s deep-router -a openrouter -U -w
-# (paste the key, then return)
+deep-claude              # first run → setup wizard, then starts the session
 ```
 
-Pick your models and go:
-
-```bash
-deep-claude pick         # choose models — writes them to .env
-deep-claude              # run Claude Code on your default pick
-```
+You can re-run the wizard any time with `deep-claude cli`, change models with `deep-claude pick`, and prefer a different default with `deep-claude --model <alias>`.
 
 ## Configuring the key
 
@@ -227,7 +222,8 @@ keeps working.
 
 | Path                     | Purpose                                                              |
 | ------------------------ | ------------------------------------------------------------------- |
-| `bin/deep-claude`        | The one command: run, `pick`, `models`, `endpoints`.                |
+| `bin/deep-claude`        | The one command: run, `cli`, `pick`, `models`, `endpoints`.         |
+| `bin/deep-claude-cli`    | The Node first-run setup wizard (key entry + picker) (internal).    |
 | `bin/deep-claude-proxy`  | The Node Anthropic→OpenRouter passthrough proxy (internal).         |
 | `bin/deep-claude-pick`   | The Node interactive model picker (internal).                       |
 | `deep-claude`            | Top-level shim that `exec`s `bin/deep-claude`.                      |
