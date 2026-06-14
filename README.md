@@ -242,6 +242,12 @@ provider prefix for the direct call (`deepseek/deepseek-v4-pro` → `deepseek-v4
 A note on DeepSeek specifically: routing it *through* OpenRouter doesn't improve privacy — OpenRouter
 becomes an additional party. A personal endpoint gives you the fewest hops *and* the speed.
 
+**Know which route you're on.** deep-claude adds a status line to the session showing the live route —
+`🐋 <model> · ⚡ direct (deepseek)` when on a direct provider, or `· openrouter` otherwise. It tracks
+your `/model` switches. (Claude Code's `/model` picker itself can't be relabelled, so this is the
+reliable indicator.) It never overrides a status line you already have, and with `--inherit` your real
+`settings.json` is copy-merged, not modified. Disable with `DEEP_CLAUDE_STATUSLINE=0`.
+
 ## How it works
 
 **OpenRouter mode (default).** `deep-claude` boots a tiny local proxy (`bin/deep-claude-proxy`, no
@@ -280,6 +286,7 @@ keeps working.
 | `bin/deep-claude-cli`    | The Node setup wizard's key-entry step (internal).                  |
 | `bin/deep-claude-pick`   | The Node interactive model picker + slot assignment (internal).     |
 | `bin/deep-claude-proxy`  | The Node Anthropic→OpenRouter passthrough proxy (internal).         |
+| `bin/deep-claude-statusline` | The Node status-line script (live route indicator) (internal).  |
 | `deep-claude`            | Top-level shim that `exec`s `bin/deep-claude`.                      |
 | `install.sh`             | Symlinks `deep-claude` into `~/.local/bin`.                         |
 | `test.sh`                | Syntax checks, arg-passthrough, CLI, and live proxy tests.          |

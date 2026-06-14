@@ -1,0 +1,51 @@
+#!/usr/bin/env node
+'use strict';
+
+// deep-claude-statusline — shows the active model and HOW it's being routed
+// (your direct provider vs OpenRouter) in Claude Code's status bar. Claude Code
+// passes session JSON on stdin and renders whatever we print. Because it's fed
+// the *current* model, the route updates live when you switch with /model.
+//
+// Routing is inferred the same way the proxy decides it: a model whose provider
+// prefix (deepseek/…) matches a personal endpoint name routes DIRECT; otherwise
+// it goes through OpenRouter. DEEP_ENDPOINTS is in the session environment.
+
+const C = {
+  reset: '\x1b[0m', dim: '\x1b[2m', cyan: '\x1b[36m',
+  green: '\x1b[32m', gray: '\x1b[90m', yellow: '\x1b[33m',
+};
+
+let input = '';
+process.stdin.on('data', (c) => (input += c));
+process.stdin.on('end', () => {
+  let id = '', name = '';
+  try {
+    const j = JSON.parse(input || '{}');
+    id = (j.model && j.model.id) || process.env.ANTHROPIC_MODEL || '';
+    name = (j.model && j.model.display_name) || id;
+  } catch {
+    id = process.env.ANTHROPIC_MODEL || '';
+    name = id;
+  }
+
+  const endpoints = (process.env.DEEP_ENDPOINTS || '')
+    .split(',').map((s) => s.split('|')[0]).filter(Boolean);
+  const base = process.env.ANTHROPIC_BASE_URL || '';
+  const viaProxy = /127\.0\.0\.1|localhost/.test(base);
+
+  let route;
+  if (!viaProxy && base) {
+    // Personal-endpoint mode (--endpoint/--base-url): the whole session is direct.
+    route = `${C.green}⚡ direct${C.reset}`;
+  } else {
+    const pfx = id.includes('/') ? id.split('/')[0] : '';
+    if (pfx && endpoints.includes(pfx)) {
+      route = `${C.green}⚡ direct (${pfx})${C.reset}`;
+    } else {
+      route = `${C.gray}openrouter${C.reset}`;
+    }
+  }
+
+  const model = name || id || 'no model';
+  process.stdout.write(`${C.cyan}🐋${C.reset} ${model} ${C.gray}·${C.reset} ${route}`);
+});

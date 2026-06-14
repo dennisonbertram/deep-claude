@@ -9,6 +9,7 @@ bash -n install.sh
 node --check bin/deep-claude-proxy
 node --check bin/deep-claude-pick
 node --check bin/deep-claude-cli
+node --check bin/deep-claude-statusline
 
 # --- run: personal endpoints (claude replaced by /bin/echo; DEEP_CLAUDE_ENV_FILE
 #     points at /dev/null so a real .env can't interfere). -----------------------

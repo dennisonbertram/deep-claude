@@ -392,8 +392,10 @@ inherit_config() {
   local real="$HOME/.claude" dest="$STATE_DIR/home/.claude"
   [[ -d "$real" ]] || return 0
   mkdir -p "$dest"
+  # settings.json is handled by ensure_statusline (copy+merge, not a symlink, so
+  # we can add our statusline without writing to your real file).
   local item src dst
-  for item in skills agents workflows rules hooks commands plugins settings.json CLAUDE.md; do
+  for item in skills agents workflows rules hooks commands plugins CLAUDE.md; do
     src="$real/$item"; dst="$dest/$item"
     [[ -e "$src" ]] || continue
     if [[ -L "$dst" ]]; then
@@ -416,6 +418,30 @@ inherit_config() {
   fi
 }
 
+# Add the deep-claude statusline (live "direct vs openrouter" route indicator)
+# to the isolated settings.json. Bases off your real settings when inheriting
+# (copy + merge, never touching your file) and keeps your own statusline if you
+# already have one. Disable with DEEP_CLAUDE_STATUSLINE=0.
+ensure_statusline() {
+  [[ "${DEEP_CLAUDE_STATUSLINE:-1}" == "1" ]] || return 0
+  command -v node >/dev/null 2>&1 || return 0
+  local dest="$STATE_DIR/home/.claude/settings.json"
+  local base=""
+  if [[ "${DEEP_CLAUDE_INHERIT:-}" == "1" && -f "$HOME/.claude/settings.json" ]]; then
+    base="$HOME/.claude/settings.json"
+  elif [[ -f "$dest" && ! -L "$dest" ]]; then
+    base="$dest"
+  fi
+  mkdir -p "$(dirname "$dest")"
+  [[ -L "$dest" ]] && rm -f "$dest" # was a symlink from an older inherit run
+  DC_DEST="$dest" DC_BASE="$base" DC_SCRIPT="$SCRIPT_DIR/deep-claude-statusline" node -e '
+    const fs=require("fs");
+    let s={}; try{ s=JSON.parse(fs.readFileSync(process.env.DC_BASE||process.env.DC_DEST,"utf8")); }catch(e){}
+    if(!s.statusLine) s.statusLine={type:"command",command:process.env.DC_SCRIPT};
+    fs.writeFileSync(process.env.DC_DEST, JSON.stringify(s,null,2));
+  ' 2>/dev/null || true
+}
+
 # Point Claude Code's state at our isolated home without touching $HOME (the
 # macOS login keychain lives under $HOME/Library/Keychains).
 set_claude_state() {
@@ -429,6 +455,7 @@ set_claude_state() {
   # last command would make set_claude_state return non-zero and, under set -e,
   # abort the run for everyone who hasn't enabled inherit.
   if [[ "${DEEP_CLAUDE_INHERIT:-}" == "1" ]]; then inherit_config; fi
+  ensure_statusline
 }
 
 # --- run: OpenRouter (default) ----------------------------------------------
