@@ -37,14 +37,17 @@ function envSet(pairs) {
   let lines = [];
   if (fs.existsSync(ENV_FILE)) lines = fs.readFileSync(ENV_FILE, 'utf8').split('\n');
   for (const [key, value] of Object.entries(pairs)) {
+    // Quote the value: .env is sourced, and model ids contain shell-active
+    // characters (~ for "latest", : in :free tags) that bash would expand.
+    const line = `${key}="${value}"`;
     let found = false;
     lines = lines.map((l) => {
-      if (l.startsWith(key + '=')) { found = true; return `${key}=${value}`; }
+      if (l.startsWith(key + '=')) { found = true; return line; }
       return l;
     });
     if (!found) {
-      if (lines.length && lines[lines.length - 1] === '') lines.splice(lines.length - 1, 0, `${key}=${value}`);
-      else lines.push(`${key}=${value}`);
+      if (lines.length && lines[lines.length - 1] === '') lines.splice(lines.length - 1, 0, line);
+      else lines.push(line);
     }
   }
   fs.writeFileSync(ENV_FILE, lines.join('\n'));

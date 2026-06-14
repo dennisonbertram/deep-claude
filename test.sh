@@ -45,6 +45,14 @@ DEEP_CLAUDE_ENV_FILE="$tmpenv" ./bin/deep-claude models default deepseek >/dev/n
 grep -q 'ROUTER_DEFAULT_MODEL=.*deepseek' "$tmpenv"
 rm -f "$tmpenv"
 
+# Regression: model ids with shell-active chars (~ for "latest", : in :free)
+# must be quoted so the written .env still sources cleanly.
+tmpenv="$(mktemp)"
+DEEP_CLAUDE_ENV_FILE="$tmpenv" ./bin/deep-claude models add '~anthropic/claude-opus-latest' opuslatest >/dev/null
+DEEP_CLAUDE_ENV_FILE="$tmpenv" ./bin/deep-claude models add 'google/gemma-4-31b-it:free' gemma >/dev/null
+( set -a; source "$tmpenv"; set +a; [[ "$(printf '%s' "$ROUTER_MODELS" | tr ',' '\n' | grep -c .)" == "2" ]] )
+rm -f "$tmpenv"
+
 # --- default (OpenRouter): boots the proxy, health-checks, then execs claude. --
 or_boot="$(CLAUDE_BIN=/bin/echo DEEP_CLAUDE_ENV_FILE=/dev/null OPENROUTER_API_KEY=k ROUTER_PORT=8911 \
   ./bin/deep-claude --model google/gemini-3.5-flash -p hi 2>/dev/null)"
