@@ -113,17 +113,31 @@ function storeKeychain(key) {
 }
 
 async function main() {
-  if (haveKey) { process.exit(0); } // nothing to collect
-
   out.write('\x1b[?25l'); // hide cursor
   setupRaw();
 
-  const key = await promptText({
-    label: 'Paste your OpenRouter API key',
-    hint: 'Get one at https://openrouter.ai/keys  ·  input is hidden',
-    mask: true,
-  });
-  if (!key) { teardownRaw(); out.write('\x1b[?25h'); clear(); out.write('Setup cancelled.\n'); process.exit(1); }
+  let key;
+  if (haveKey) {
+    // A key is already configured — let them keep it or paste a replacement.
+    const v = await promptText({
+      label: 'An OpenRouter key is already set',
+      hint: 'Press ↵ to keep it, or paste a new key to replace it  ·  input is hidden',
+      mask: true,
+    });
+    if (!v) { // Enter (keep) or Esc — leave the existing key in place
+      teardownRaw(); out.write('\x1b[?25h');
+      header(); out.write(`  ${C.green}✓${C.reset} Keeping your existing OpenRouter key.\n\n`);
+      process.exit(0);
+    }
+    key = v;
+  } else {
+    key = await promptText({
+      label: 'Paste your OpenRouter API key',
+      hint: 'Get one at https://openrouter.ai/keys  ·  input is hidden',
+      mask: true,
+    });
+    if (!key) { teardownRaw(); out.write('\x1b[?25h'); clear(); out.write('Setup cancelled.\n'); process.exit(1); }
+  }
 
   let where = 1;
   if (process.platform === 'darwin') {

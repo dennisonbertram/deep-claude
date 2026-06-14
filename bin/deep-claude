@@ -291,11 +291,15 @@ run_setup() {
   local interactive=""
   [[ "${1:-}" == "interactive" ]] && interactive=1
 
-  if [[ -z "$(resolve_openrouter_key)" ]]; then
-    OPENROUTER_API_KEY="" DEEP_CLAUDE_ENV_FILE="$ENV_FILE" node "$SCRIPT_DIR/deep-claude-cli" || return 1
-    load_env
-  fi
   local key; key="$(resolve_openrouter_key)"
+  # Run the key step when interactive (so `deep-claude cli` can keep/replace the
+  # key) or when no key exists yet. Pass the current key so the wizard can offer
+  # to keep it instead of forcing a re-entry.
+  if [[ -n "$interactive" || -z "$key" ]]; then
+    OPENROUTER_API_KEY="$key" DEEP_CLAUDE_ENV_FILE="$ENV_FILE" node "$SCRIPT_DIR/deep-claude-cli" || return 1
+    load_env
+    key="$(resolve_openrouter_key)"
+  fi
   [[ -z "$key" ]] && return 1
 
   if [[ -n "$interactive" || -z "$(env_get ROUTER_MODELS)" ]]; then
