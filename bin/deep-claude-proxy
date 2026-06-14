@@ -1,0 +1,338 @@
+#!/usr/bin/env node
+'use strict';
+
+// deep-claude-proxy — a thin Anthropic-format passthrough proxy in front of
+// OpenRouter's native /v1/messages endpoint. Booted by `deep-claude`.
+//
+// Claude Code speaks the Anthropic Messages API. OpenRouter *also* serves that
+// shape at POST /api/v1/messages and routes it to any model on the platform
+// (Claude, Gemini, GPT, DeepSeek, ...). So this proxy does not translate the
+// payload — it only:
+//   1. resolves a friendly model alias -> an OpenRouter model id,
+//   2. enforces a curated allow-list (so you expose a few models, not 300),
+//   3. strips Anthropic-only fields that 400 on non-Claude models
+//      (context_management, and the context-management beta header),
+//   4. injects the server-side OpenRouter key,
+//   5. streams the response straight back.
+//
+// Config comes entirely from the environment (set by deep-claude):
+//   OPENROUTER_API_KEY   required — server-side OpenRouter key (Bearer).
+//   ROUTER_MODELS        comma list of OpenRouter model ids to expose.
+//   ROUTER_ALIASES       comma list of alias=provider/model pairs.
+//   ROUTER_PORT          listen port (default 8787).
+//   ROUTER_HOST          listen host (default 127.0.0.1).
+//   ROUTER_STRICT        "1" => reject models not in the allow-list.
+//   OPENROUTER_BASE_URL  upstream API root (default https://openrouter.ai/api).
+//   ROUTER_KEEP_THINKING "1" => don't strip thinking blocks for non-Claude models.
+//   ROUTER_REFERER       optional HTTP-Referer for OpenRouter rankings.
+//   ROUTER_TITLE         optional X-Title for OpenRouter rankings.
+//   ROUTER_DEBUG         "1" => log each request line to stderr.
+
+const http = require('http');
+const { Readable } = require('stream');
+
+const PORT = parseInt(process.env.ROUTER_PORT || '8787', 10);
+const HOST = process.env.ROUTER_HOST || '127.0.0.1';
+// Base is the API root; the incoming Anthropic path (/v1/messages, /v1/models)
+// is appended to it. OpenRouter's native Anthropic endpoint is /api/v1/messages,
+// so the base is /api — NOT /api/v1 (that would double the /v1).
+const UPSTREAM = (process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api').replace(/\/+$/, '');
+const API_KEY = process.env.OPENROUTER_API_KEY || '';
+const STRICT = process.env.ROUTER_STRICT === '1';
+const DEBUG = process.env.ROUTER_DEBUG === '1';
+const MAX_BODY = 32 * 1024 * 1024; // 32 MB
+
+const MODELS = (process.env.ROUTER_MODELS || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+const ALIASES = {};
+for (const pair of (process.env.ROUTER_ALIASES || '').split(',')) {
+  const t = pair.trim();
+  if (!t) continue;
+  const i = t.indexOf('=');
+  if (i < 0) continue;
+  ALIASES[t.slice(0, i).trim()] = t.slice(i + 1).trim();
+}
+
+// The curated set the client may target = explicit models + every alias target.
+const ALLOWED = new Set([...MODELS, ...Object.values(ALIASES)]);
+
+function log(...args) {
+  if (DEBUG) console.error('[deep-claude]', ...args);
+}
+
+function resolveModel(model) {
+  if (!model) return model;
+  if (Object.prototype.hasOwnProperty.call(ALIASES, model)) return ALIASES[model];
+  return model;
+}
+
+// Remove Anthropic-only request fields that OpenRouter rejects (400) or ignores
+// for non-Claude models. context_management is the one that hard-fails.
+function sanitizeBody(obj) {
+  if (!obj || typeof obj !== 'object') return obj;
+  delete obj.context_management;
+  if (obj.model) obj.model = resolveModel(obj.model);
+  return obj;
+}
+
+// Strip the context-management token out of an anthropic-beta header value so
+// the rest of the betas still pass through.
+function sanitizeBeta(value) {
+  if (!value) return undefined;
+  const kept = value
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s && !s.startsWith('context-management'));
+  return kept.length ? kept.join(',') : undefined;
+}
+
+// OpenRouter's Anthropic skin injects `redacted_thinking` blocks for non-Claude
+// reasoning models (Gemini, etc.) — and streams them OUT OF ORDER (a thinking
+// block closes before the text block it interrupts). Claude Code then drops the
+// model's visible text and shows an empty result. The text itself is always
+// present and correct, so for non-Anthropic models we strip thinking blocks from
+// the response (JSON + SSE) and renumber the remaining block indices. Genuine
+// Claude models pass through untouched. Disable with ROUTER_KEEP_THINKING=1.
+const THINKING_TYPES = new Set(['thinking', 'redacted_thinking']);
+const KEEP_THINKING = process.env.ROUTER_KEEP_THINKING === '1';
+
+function shouldStripThinking(model) {
+  return !KEEP_THINKING && !!model && !/^anthropic\//.test(model);
+}
+
+// Stream-transform an SSE body, dropping thinking content blocks and renumbering
+// the surviving block indices so they stay contiguous and in order.
+async function pipeSseStripThinking(webBody, res) {
+  const reader = Readable.fromWeb(webBody);
+  const dropped = new Set();
+  const remap = new Map();
+  let next = 0;
+  let buf = '';
+
+  const handleEvent = (rawEvent) => {
+    if (!rawEvent.trim()) return;
+    let evType = null;
+    let dataStr = null;
+    for (const ln of rawEvent.split('\n')) {
+      if (ln.startsWith('event:')) evType = ln.slice(6).trim();
+      else if (ln.startsWith('data:')) dataStr = ln.slice(5).trim();
+    }
+    if (dataStr == null) {
+      res.write(rawEvent + '\n\n');
+      return;
+    }
+    let obj;
+    try {
+      obj = JSON.parse(dataStr);
+    } catch {
+      res.write(rawEvent + '\n\n');
+      return;
+    }
+    if (obj.type === 'content_block_start') {
+      const bt = obj.content_block && obj.content_block.type;
+      if (THINKING_TYPES.has(bt)) {
+        dropped.add(obj.index);
+        return;
+      }
+      remap.set(obj.index, next);
+      obj.index = next;
+      next += 1;
+    } else if (obj.type === 'content_block_delta' || obj.type === 'content_block_stop') {
+      if (dropped.has(obj.index)) return;
+      if (remap.has(obj.index)) obj.index = remap.get(obj.index);
+    }
+    res.write((evType ? `event: ${evType}\n` : '') + `data: ${JSON.stringify(obj)}\n\n`);
+  };
+
+  for await (const chunk of reader) {
+    buf += chunk.toString('utf8');
+    let i;
+    while ((i = buf.indexOf('\n\n')) !== -1) {
+      handleEvent(buf.slice(0, i));
+      buf = buf.slice(i + 2);
+    }
+  }
+  if (buf.trim()) handleEvent(buf);
+  res.end();
+}
+
+function sendJson(res, status, obj) {
+  const body = JSON.stringify(obj);
+  res.writeHead(status, { 'content-type': 'application/json' });
+  res.end(body);
+}
+
+function anthropicError(res, status, type, message) {
+  sendJson(res, status, { type: 'error', error: { type, message } });
+}
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > MAX_BODY) {
+        reject(new Error('request body too large'));
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
+// GET /v1/models — advertise only the curated set, in Anthropic list shape.
+function handleModels(res) {
+  const data = [...ALLOWED].map((id) => ({
+    type: 'model',
+    id,
+    display_name: id,
+    created_at: new Date().toISOString(),
+  }));
+  sendJson(res, 200, { data, has_more: false, first_id: data[0]?.id || null, last_id: data[data.length - 1]?.id || null });
+}
+
+// Approximate token estimate when upstream count_tokens is unavailable.
+function estimateTokens(body) {
+  try {
+    const obj = JSON.parse(body.toString('utf8'));
+    let text = '';
+    if (typeof obj.system === 'string') text += obj.system;
+    else if (Array.isArray(obj.system)) for (const b of obj.system) text += (b && b.text) || '';
+    for (const m of obj.messages || []) {
+      if (typeof m.content === 'string') text += m.content;
+      else if (Array.isArray(m.content)) for (const b of m.content) text += (b && b.text) || '';
+    }
+    return Math.max(1, Math.ceil(text.length / 4));
+  } catch {
+    return 1;
+  }
+}
+
+async function forward(req, res, path, raw) {
+  let parsed;
+  try {
+    parsed = raw.length ? JSON.parse(raw.toString('utf8')) : {};
+  } catch {
+    return anthropicError(res, 400, 'invalid_request_error', 'request body is not valid JSON');
+  }
+
+  const requested = parsed.model;
+  sanitizeBody(parsed);
+
+  if (STRICT && requested && !ALLOWED.has(parsed.model) && !ALLOWED.has(requested)) {
+    return anthropicError(
+      res,
+      400,
+      'invalid_request_error',
+      `model "${requested}" is not in this router's allow-list (${[...ALLOWED].join(', ') || 'empty'})`
+    );
+  }
+
+  const outBody = Buffer.from(JSON.stringify(parsed), 'utf8');
+  const headers = {
+    'content-type': 'application/json',
+    authorization: `Bearer ${API_KEY}`,
+    'anthropic-version': req.headers['anthropic-version'] || '2023-06-01',
+  };
+  const beta = sanitizeBeta(req.headers['anthropic-beta']);
+  if (beta) headers['anthropic-beta'] = beta;
+  if (process.env.ROUTER_REFERER) headers['http-referer'] = process.env.ROUTER_REFERER;
+  if (process.env.ROUTER_TITLE) headers['x-title'] = process.env.ROUTER_TITLE;
+
+  log(req.method, path, '->', parsed.model, parsed.stream ? '(stream)' : '');
+
+  let upstream;
+  try {
+    upstream = await fetch(`${UPSTREAM}${path}`, { method: 'POST', headers, body: outBody });
+  } catch (err) {
+    // count_tokens has no real upstream guarantee — fall back to an estimate.
+    if (path === '/v1/messages/count_tokens') {
+      return sendJson(res, 200, { input_tokens: estimateTokens(raw) });
+    }
+    return anthropicError(res, 502, 'api_error', `upstream request failed: ${err.message}`);
+  }
+
+  // If count_tokens isn't supported upstream, synthesize an approximate answer.
+  if (path === '/v1/messages/count_tokens' && !upstream.ok) {
+    return sendJson(res, 200, { input_tokens: estimateTokens(raw) });
+  }
+
+  const ct = upstream.headers.get('content-type') || '';
+  const strip = path === '/v1/messages' && shouldStripThinking(parsed.model);
+
+  // Fast path: genuine Claude models (or stripping disabled) pass straight through.
+  if (!strip) {
+    res.writeHead(upstream.status, ct ? { 'content-type': ct } : {});
+    if (upstream.body) {
+      Readable.fromWeb(upstream.body).pipe(res);
+    } else {
+      res.end();
+    }
+    return;
+  }
+
+  if (ct.includes('text/event-stream')) {
+    res.writeHead(upstream.status, { 'content-type': ct });
+    if (upstream.body) {
+      await pipeSseStripThinking(upstream.body, res);
+    } else {
+      res.end();
+    }
+    return;
+  }
+
+  // Non-streaming JSON: drop thinking blocks from content[].
+  const bodyBuf = Buffer.from(await upstream.arrayBuffer());
+  let out = bodyBuf;
+  try {
+    const j = JSON.parse(bodyBuf.toString('utf8'));
+    if (Array.isArray(j.content)) {
+      j.content = j.content.filter((b) => !(b && THINKING_TYPES.has(b.type)));
+      out = Buffer.from(JSON.stringify(j), 'utf8');
+    }
+  } catch {
+    // leave the body untouched if it isn't the JSON we expect
+  }
+  res.writeHead(upstream.status, { 'content-type': 'application/json' });
+  res.end(out);
+}
+
+const server = http.createServer(async (req, res) => {
+  const url = req.url || '';
+  const path = url.split('?')[0];
+
+  if (req.method === 'GET' && (path === '/health' || path === '/')) {
+    return sendJson(res, 200, { service: 'deep-claude-proxy', status: 'ok', upstream: UPSTREAM, models: [...ALLOWED] });
+  }
+  if (req.method === 'GET' && path === '/v1/models') {
+    return handleModels(res);
+  }
+  if (req.method === 'POST' && (path === '/v1/messages' || path === '/v1/messages/count_tokens')) {
+    if (!API_KEY) return anthropicError(res, 500, 'authentication_error', 'OPENROUTER_API_KEY is not set on the router');
+    let raw;
+    try {
+      raw = await readBody(req);
+    } catch (err) {
+      return anthropicError(res, 413, 'invalid_request_error', err.message);
+    }
+    return forward(req, res, path, raw);
+  }
+
+  anthropicError(res, 404, 'not_found_error', `no route for ${req.method} ${path}`);
+});
+
+server.listen(PORT, HOST, () => {
+  console.error(`[deep-claude] listening on http://${HOST}:${PORT} -> ${UPSTREAM}`);
+  console.error(`[deep-claude] exposing: ${[...ALLOWED].join(', ') || '(none — set ROUTER_MODELS/ROUTER_ALIASES)'}`);
+});
+
+for (const sig of ['SIGINT', 'SIGTERM']) {
+  process.on(sig, () => server.close(() => process.exit(0)));
+}

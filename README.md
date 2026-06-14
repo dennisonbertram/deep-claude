@@ -5,71 +5,81 @@
 <h1 align="center">deep-claude 🐋</h1>
 
 <p align="center">
-  <b>Drive Claude Code with DeepSeek's V4 models.</b><br>
-  Same harness you already love. A different mind behind it. Cleanly isolated, optionally sandboxed.
+  <b>Drive Claude Code with any model.</b><br>
+  OpenRouter by default — Gemini, GPT, DeepSeek, Grok, Qwen, Claude, and more — or any
+  Anthropic-compatible endpoint you point it at. Same harness, a different mind, cleanly isolated.
 </p>
 
 <p align="center">
   <a href="https://dennisonbertram.github.io/deep-claude/">Website</a> ·
   <a href="#quickstart">Install</a> ·
   <a href="#usage">Usage</a> ·
-  <a href="#configuring-the-api-key">API key</a> ·
+  <a href="#personal-endpoints">Endpoints</a> ·
   <a href="#how-it-works">How it works</a> ·
   <a href="#troubleshooting">Troubleshooting</a>
 </p>
 
 <p align="center">
-  <code>deep-claude</code> points <a href="https://claude.com/claude-code">Claude Code</a> at DeepSeek's
-  Anthropic-compatible endpoint and redirects its state into a private home, so your real
-  Anthropic login is never touched. Type <code>deep-claude</code> followed by any normal
-  <code>claude</code> arguments and you get the full agentic harness — tools, MCP, slash
-  commands, sub-agents, the works — running on <code>deepseek-v4-pro</code>.
+  <code>deep-claude</code> points <a href="https://claude.com/claude-code">Claude Code</a> at
+  <a href="https://openrouter.ai">OpenRouter</a> through a tiny local proxy and redirects its state
+  into a private home, so your real Anthropic login is never touched. Pick the models you want, then
+  type <code>deep-claude</code> followed by any normal <code>claude</code> arguments — you get the full
+  agentic harness (tools, MCP, slash commands, sub-agents) running on whichever model you chose.
 </p>
 
 ```console
+$ deep-claude pick                       # choose your models from OpenRouter's catalog
 $ deep-claude -p "refactor this module and run the tests"
-…the Claude Code agent loop you know — planning, editing, running — on DeepSeek V4…
+…the Claude Code agent loop you know — planning, editing, running — on your default model…
 
-$ deep-cco --model flash -p "triage these failing tests"
-…same thing, sandboxed, on the faster flash model…
+$ deep-claude --model opus -p "review this diff"          # switch model per run
+$ deep-claude --endpoint deepseek --model deepseek-v4-pro # or hit a provider directly
 ```
 
-## Why run DeepSeek in the Claude harness?
+## Why?
 
-Claude Code is one of the best agentic coding harnesses there is: the planning loop, tool
-use, MCP servers, sub-agents, permissions, and slash commands are all _harness_, not
-_model_. DeepSeek's V4 models speak the Anthropic API, so you can keep every bit of that
-machinery and just swap the brain.
+Claude Code is one of the best agentic coding harnesses there is: the planning loop, tool use, MCP
+servers, sub-agents, permissions, and slash commands are all _harness_, not _model_. Lots of models
+speak (or can be made to speak) the Anthropic API — so you can keep every bit of that machinery and
+swap the brain.
 
-- **Run real workflows, not just chat.** Multi-step edits, test loops, MCP tools, and
-  sub-agents all work — DeepSeek V4 drives the same agent loop Claude Code gives you.
-- **Genuinely strong at code.** V4-pro is sharp on reasoning, refactors, and long-context
-  work; `flash` is fast and cheap for triage, scripting, and bulk passes.
-- **Cost-effective.** Pay DeepSeek's API rates for heavy autonomous runs while keeping your
-  Anthropic subscription pristine for everything else.
-- **Zero contamination.** Session history, projects, MCP config, and `~/.claude.json` live
-  in a private `.deep-claude-home/` — your normal Claude Code setup is untouched.
-- **Sandbox on demand.** `deep-cco` runs the whole thing inside a real OS sandbox, so you
-  can hand an agent `--dangerously-skip-permissions` without handing it your `$HOME`.
+- **One key, any model.** An OpenRouter key gets you Gemini, GPT, DeepSeek, Grok, Qwen, Claude, and
+  hundreds more behind a single endpoint.
+- **A curated, pretty picker.** `deep-claude pick` is a searchable, multi-select TUI over the whole
+  catalog (with context windows and pricing), and assigns your picks to Claude Code's switch slots so
+  you can flip between them in-session.
+- **Real multi-model workflows.** A sub-agent's `model:` accepts a full model id, so one workflow can
+  run many models at once — the orchestrator on one, sub-agents pinned to others (proven end-to-end).
+- **Keep your setup.** `--inherit` brings your existing skills, agents, workflows, plugins, hooks, and
+  MCP servers along — without importing your Anthropic login. See
+  [Use your existing Claude setup](#use-your-existing-claude-setup-skills-plugins-mcp-).
+- **Zero contamination.** Session history, projects, MCP config, and `~/.claude.json` live in a
+  private state dir — your normal Claude Code setup is untouched, and `$HOME` is left alone so the
+  macOS keychain keeps working.
+- **Bring your own endpoint.** DeepSeek-direct, a local Ollama, a self-hosted gateway — any
+  Anthropic-compatible URL is a [personal endpoint](#personal-endpoints) away.
 
-> **Your normal setup is safe.** The wrappers only set a few environment variables and
-> redirect `$HOME` per launch. They never read, move, or modify your Anthropic credentials.
+> **Your normal setup is safe.** `deep-claude` only sets a few environment variables and redirects
+> Claude Code's state directory per launch. It never reads, moves, or modifies your Anthropic credentials.
 
-Two thin Bash wrappers:
-
-| Wrapper      | What it does                                                                 | Extra dependency                                       |
-| ------------ | ---------------------------------------------------------------------------- | ------------------------------------------------------ |
-| `deep-claude` | Runs `claude` against `api.deepseek.com/anthropic` with isolated state.     | none                                                   |
-| `deep-cco`    | Same as `deep-claude`, but inside [nikvdp/cco](https://github.com/nikvdp/cco)'s sandbox. | [`cco`](https://github.com/nikvdp/cco) |
-
-Both wrappers share the same state directory, so DeepSeek session history is consistent whether you run sandboxed or unsandboxed.
+| Command                       | What it does                                                  |
+| ----------------------------- | ------------------------------------------------------------ |
+| `deep-claude`                 | Run Claude Code on your default model (first run: setup wizard). |
+| `deep-claude --model X`       | Run on a specific model (alias or full id) for this session. |
+| `deep-claude cli`             | The setup wizard — enter your key and pick models.           |
+| `deep-claude pick`            | Interactive model picker over OpenRouter's catalog.          |
+| `deep-claude models …`        | Curate the model set non-interactively.                      |
+| `deep-claude endpoints …`     | Manage personal (non-OpenRouter) endpoints.                  |
+| `deep-claude --endpoint NAME` | Run on a saved personal endpoint.                            |
+| `deep-claude --inherit`       | Bring in your real `~/.claude` skills/plugins/MCP/etc.       |
 
 ## Contents
 
 - [Requirements](#requirements)
 - [Quickstart](#quickstart)
-- [Configuring the API key](#configuring-the-api-key)
+- [Configuring the key](#configuring-the-key)
 - [Usage](#usage)
+- [Personal endpoints](#personal-endpoints)
 - [How it works](#how-it-works)
 - [Troubleshooting](#troubleshooting)
 - [Development](#development)
@@ -78,13 +88,8 @@ Both wrappers share the same state directory, so DeepSeek session history is con
 
 - **macOS or Linux**
 - **[Claude Code](https://claude.com/claude-code)** — `claude` on `PATH`. Install via the [official installer](https://claude.com/claude-code) or `npm i -g @anthropic-ai/claude-code`.
-- **A DeepSeek API key** — sign up at [platform.deepseek.com](https://platform.deepseek.com/).
-- **[nikvdp/cco](https://github.com/nikvdp/cco)** — **only** required for `deep-cco`. Install with:
-  ```bash
-  curl -fsSL https://raw.githubusercontent.com/nikvdp/cco/master/install.sh | bash
-  ```
-
-`deep-cco` is installed by this repo's `install.sh` regardless of whether `cco` is present; it will refuse to start with a clear error if `cco` is missing at runtime.
+- **[Node.js](https://nodejs.org/)** — the local proxy and the model picker run on `node`.
+- **An [OpenRouter API key](https://openrouter.ai/keys)** for the default path (and/or a key for any personal endpoint you add).
 
 ## Quickstart
 
@@ -92,144 +97,196 @@ Both wrappers share the same state directory, so DeepSeek session history is con
 git clone https://github.com/dennisonbertram/deep-claude
 cd deep-claude
 ./install.sh
+export PATH="$HOME/.local/bin:$PATH"     # if it isn't already
 ```
 
-This symlinks `deep-claude` and `deep-cco` into `~/.local/bin`. Make sure that directory is on your `PATH`:
+Then just run it — the **first run walks you through setup** (enter your [OpenRouter key](https://openrouter.ai/keys), then pick your models):
 
 ```bash
-export PATH="$HOME/.local/bin:$PATH"
+deep-claude              # first run → setup wizard, then starts the session
 ```
 
-Set your DeepSeek API key (Keychain is recommended on macOS — see all options below):
+You can re-run the wizard any time with `deep-claude cli`, change models with `deep-claude pick`, and prefer a different default with `deep-claude --model <alias>`.
 
-```bash
-security add-generic-password -s deep-claude -a deepseek -U -w
-# (paste the key, then return)
-```
+## Configuring the key
 
-Run it:
+`deep-claude` looks for `OPENROUTER_API_KEY` in this order:
 
-```bash
-deep-claude              # interactive session on deepseek-v4-pro
-deep-cco                 # same, but sandboxed (requires cco installed)
-```
-
-## Configuring the API key
-
-The wrappers look for `DEEPSEEK_API_KEY` in this order:
-
-1. **Shell environment** — `export DEEPSEEK_API_KEY="sk-..."`
+1. **Shell environment** — `export OPENROUTER_API_KEY="sk-or-..."`
 2. **`.env` next to this repo** — `cp .env.example .env && $EDITOR .env`
-3. **macOS Keychain** — `security add-generic-password -s deep-claude -a deepseek -U -w`
-
-The literal placeholder `sk-...` (as committed in `.env.example`) is treated as **unset**, so a stale `.env` won't shadow a real Keychain entry.
+3. **macOS Keychain** — `security add-generic-password -s deep-router -a openrouter -U -w`
 
 ### Keychain details (macOS)
 
-- Service: `deep-claude` — Account: `deepseek`
+- Service: `deep-router` — Account: `openrouter`
 - The `security` binary handles all reads, so the key never lives in `.env`, shell history, or process listings.
-- The first read after a reboot may show a Keychain access prompt. Click **Always Allow** once and subsequent calls are silent.
-- To rotate the key: re-run the `security add-generic-password` command (the `-U` flag updates in place).
-- To inspect: `security find-generic-password -s deep-claude -a deepseek -w`
-- To remove: `security delete-generic-password -s deep-claude -a deepseek`
-
-### `.env` details
-
-Copy `.env.example` to `.env` (gitignored) and set `DEEPSEEK_API_KEY=...`. You can also override the executables:
-
-```bash
-# Optional
-CLAUDE_BIN=claude   # used by deep-claude
-CCO_BIN=cco         # used by deep-cco
-```
+- First read after a reboot may show a Keychain prompt. Click **Always Allow** once and subsequent calls are silent.
+- Rotate: re-run the `add-generic-password` command (`-U` updates in place). Inspect: `security find-generic-password -s deep-router -a openrouter -w`.
 
 ## Usage
 
-### `deep-claude` — unsandboxed
+### Pick your models
 
 ```bash
-deep-claude                                # interactive, deepseek-v4-pro (default)
-deep-claude --model flash                  # deepseek-v4-flash
-deep-claude --model deepseek-v4-pro        # full model name also works
-deep-claude -p "hello"                     # non-interactive prompt
-deep-claude --model flash -- -p "hello"    # -- stops deep-claude option parsing
+deep-claude pick
 ```
 
-Model aliases:
+```
+  Select models to expose
+  17/337 models  ·  2 selected
+  search: gemini▏
 
-- `pro` → `deepseek-v4-pro` (default)
-- `flash` → `deepseek-v4-flash`
+  ◉ google/gemini-2.5-flash      1.0M  $0.30/$2.50   Google: Gemini 2.5 Flash
+> ◉ google/gemini-2.5-pro        1.0M  $1.25/$10     Google: Gemini 2.5 Pro
+    ↑/↓ move · space select · type to search · ↵ confirm · esc cancel
+```
 
-All arguments other than `--model` pass straight through to `claude`. Use `--` to be explicit when `claude`'s own flags overlap with the wrapper's.
-
-### `deep-cco` — sandboxed via [nikvdp/cco](https://github.com/nikvdp/cco)
-
-Same wrapper, but everything runs inside `cco`'s sandbox (native: Seatbelt on macOS, bubblewrap on Linux; Docker as a fallback). Use this when you want the ergonomics of `--dangerously-skip-permissions` without exposing all of `$HOME` to a prompt-injectable agent.
+After selecting, a second screen lets you assign models to Claude Code's switch slots
+(Default + Fable/Opus/Sonnet/Haiku — see [Switching models](#switching-models-inside-a-session)). The
+picker writes `ROUTER_MODELS` / `ROUTER_ALIASES` / `ROUTER_DEFAULT_MODEL` / `ROUTER_SLOT_*` to `.env`.
+Curate non-interactively if you prefer:
 
 ```bash
-deep-cco                       # sandboxed DeepSeek session
-deep-cco --model flash
-deep-cco --safe -p "hi"        # cco's experimental tighter sandbox (hides $HOME)
-deep-cco -- -p 3000:3000       # pass args through to cco's underlying sandbox backend
+deep-claude models add google/gemini-3.5-flash      gemini   # id + optional alias
+deep-claude models add anthropic/claude-opus-4.8    opus
+deep-claude models default gemini
+deep-claude models list
+deep-claude models remove opus
 ```
 
-`--model` is consumed locally; everything else flows to `cco` (and then to `claude` per cco's rules). See [cco's README](https://github.com/nikvdp/cco) for sandbox flags like `--safe`, `--add-dir`, `--allow-readonly`, and `--deny-path`.
+(Model ids change over time — check [openrouter.ai/models](https://openrouter.ai/models) for current slugs.)
+
+### Run
+
+```bash
+deep-claude                                # default model (ROUTER_DEFAULT_MODEL)
+deep-claude --model opus                   # by alias
+deep-claude --model x-ai/grok-4.1          # or a full OpenRouter id
+deep-claude -p "explain this repo"         # non-interactive
+deep-claude --model gemini -- -p "hi"      # -- stops deep-claude's own option parsing
+```
+
+### Switching models inside a session
+
+Claude Code's in-session `/model` picker is Claude-centric — its gateway discovery only surfaces `anthropic/*` models. So `deep-claude pick` also lets you **assign your models to Claude Code's switch slots** (Default + Fable/Opus/Sonnet/Haiku). Those slots accept *any* provider, so after assigning (say) Gemini→Opus and Grok→Sonnet, you can flip between them mid-session with `/model` (the rows are labelled "Custom Opus/Sonnet/Haiku model" but point at whatever you assigned).
+
+Three ways to reach your models, then:
+
+- **`/model`** — your slot-assigned models (any provider) + any Claude models (gateway).
+- **`deep-claude --model <alias>`** — launch a session on *any* of your curated models.
+- **Sub-agents** — a sub-agent's `model:` frontmatter can pin *any* model in your set; the orchestrator and sub-agents run on different models concurrently (verified end-to-end via the proxy).
+
+Everything other than `deep-claude`'s own flags passes straight through to `claude`.
+
+### Use your existing Claude setup (skills, plugins, MCP, …)
+
+By default deep-claude runs in an isolated config, so it doesn't see your real `~/.claude`. To bring your **skills, agents, workflows, rules, hooks, plugins, `settings.json`, `CLAUDE.md`, and MCP servers** into the session:
+
+```bash
+deep-claude --inherit            # one run
+# …or persist it:
+echo 'DEEP_CLAUDE_INHERIT="1"' >> .env
+```
+
+It symlinks those config dirs/files and merges your MCP servers (from `~/.claude.json`) into the isolated home — but **never imports your Anthropic login or chat history**, so it can't conflict with the OpenRouter routing. Your real `~/.claude` is only read; deep-claude's own session history stays separate.
+
+> **Non-Claude reasoning models:** OpenRouter's Anthropic skin emits (out-of-order) `redacted_thinking`
+> blocks for models like Gemini, which would otherwise make Claude Code show an empty response. The
+> proxy strips those blocks for non-`anthropic/` models so the visible text comes through; genuine
+> Claude models pass through untouched. Disable with `ROUTER_KEEP_THINKING=1`.
+
+## Personal endpoints
+
+OpenRouter is the default, but any **Anthropic-compatible** endpoint — DeepSeek-direct, a local
+Ollama, a self-hosted gateway — is a second-tier option. Save one and reuse it:
+
+```bash
+deep-claude endpoints add deepseek https://api.deepseek.com/anthropic DEEPSEEK_API_KEY
+deep-claude endpoints add ollama   http://localhost:11434             # no key needed
+deep-claude endpoints list
+
+deep-claude --endpoint deepseek --model deepseek-v4-pro
+deep-claude --endpoint ollama   --model qwen3-coder -p "write a test"
+```
+
+The third argument names the **environment variable** holding that endpoint's key (resolved from your
+shell or `.env`). Or skip the save and pass it inline:
+
+```bash
+deep-claude --base-url https://api.deepseek.com/anthropic --api-key-env DEEPSEEK_API_KEY \
+  --model deepseek-v4-pro -p "hello"
+```
+
+Personal endpoints talk to the provider **directly** (no proxy, no model picker, no thinking-strip).
+A note on DeepSeek specifically: routing it *through* OpenRouter doesn't improve privacy — OpenRouter
+becomes an additional party. Use a personal endpoint when you want the fewest hops or a provider
+OpenRouter doesn't carry.
 
 ## How it works
 
-Both wrappers set the same environment variables:
+**OpenRouter mode (default).** `deep-claude` boots a tiny local proxy (`bin/deep-claude-proxy`, no
+dependencies beyond `node`) in front of OpenRouter's native Anthropic Messages endpoint, then points
+Claude Code at it:
 
 ```
-ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic
-ANTHROPIC_AUTH_TOKEN=$DEEPSEEK_API_KEY
-ANTHROPIC_API_KEY=$DEEPSEEK_API_KEY
-ANTHROPIC_MODEL=<selected model>
+ANTHROPIC_BASE_URL=http://127.0.0.1:<free port>   # the local proxy (8787+, auto-chosen)
+ANTHROPIC_AUTH_TOKEN=router                       # the proxy injects your real OpenRouter key
+CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1       # surfaces your Claude models in /model
+ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU,FABLE}_MODEL  # your slot assignments (any provider)
 ```
 
-…and redirect `HOME` plus the XDG `config`/`cache`/`data`/`state` directories into `<repo>/.deep-claude-home/`. Claude Code's state — session history, projects, MCP configuration, `~/.claude.json` — lives there instead of in your real `~/.claude/`. Your normal Anthropic Claude Code setup is untouched.
+It picks a free local port (8787 is often taken by other dev servers). The proxy resolves model
+aliases, enforces your curated allow-list, injects the server-side OpenRouter key, strips the
+Anthropic-only `context_management` field (which 400s on non-Claude models), and strips the
+out-of-order `redacted_thinking` blocks described above. Its log goes to `.deep-claude-home/proxy.log`.
 
-`deep-cco` inherits that redirected `$HOME` and then execs `cco`. cco's filesystem-detection logic uses `$HOME` to find Claude's config dir, so it auto-mounts the redirected `.deep-claude-home/home/.claude` as writable inside the sandbox. Namespace isolation survives the sandboxing layer.
+> **About Claude Code's `/model` picker:** its built-in gateway discovery only lists `anthropic/*`
+> models. Non-Claude models reach `/model` via the **switch slots** you assign in `deep-claude pick`;
+> any model is always reachable with `deep-claude --model <alias>` or a sub-agent's `model:` field.
+
+**Personal-endpoint mode.** `deep-claude --endpoint …` / `--base-url …` sets `ANTHROPIC_BASE_URL` to
+the endpoint and talks to it directly — no proxy.
+
+**State isolation (both modes).** Claude Code's state — session history, projects, MCP config,
+`~/.claude.json` — is redirected via `CLAUDE_CONFIG_DIR` and the XDG dirs into `<repo>/.deep-claude-home/`,
+so your real `~/.claude/` is untouched. `$HOME` is deliberately left alone so the macOS login keychain
+keeps working.
 
 ### Files
 
-| Path                       | Purpose                                                                  |
-| -------------------------- | ------------------------------------------------------------------------ |
-| `bin/deep-claude`          | The wrapper script                                                       |
-| `bin/deep-cco`             | The sandboxed wrapper                                                    |
-| `deep-claude`, `deep-cco`  | Top-level shims that `exec bin/...` — handy for `./deep-claude` from the repo |
-| `install.sh`               | Symlinks both into `~/.local/bin`                                        |
-| `test.sh`                  | Syntax and arg-passthrough tests                                         |
-| `.env.example`             | Template; copy to `.env` to set the API key in a file                    |
-| `.deep-claude-home/`       | gitignored; created on first run; holds isolated Claude Code state       |
+| Path                     | Purpose                                                              |
+| ------------------------ | ------------------------------------------------------------------- |
+| `bin/deep-claude`        | The one command: run, `cli`, `pick`, `models`, `endpoints`.         |
+| `bin/deep-claude-cli`    | The Node setup wizard's key-entry step (internal).                  |
+| `bin/deep-claude-pick`   | The Node interactive model picker + slot assignment (internal).     |
+| `bin/deep-claude-proxy`  | The Node Anthropic→OpenRouter passthrough proxy (internal).         |
+| `deep-claude`            | Top-level shim that `exec`s `bin/deep-claude`.                      |
+| `install.sh`             | Symlinks `deep-claude` into `~/.local/bin`.                         |
+| `test.sh`                | Syntax checks, arg-passthrough, CLI, and live proxy tests.          |
+| `.env.example`           | Template; copy to `.env` for keys, the curated set, and endpoints.  |
+| `.deep-claude-home/`     | gitignored; isolated Claude Code state.                             |
 
 ## Troubleshooting
 
-**`deep-claude: missing DEEPSEEK_API_KEY`**
-No key found in shell env, `.env`, or Keychain. Set one (see [Configuring the API key](#configuring-the-api-key)). Common gotcha: a `.env` file containing the literal `DEEPSEEK_API_KEY=sk-...` placeholder is treated as unset starting from `7629c8b` — if you're on an older version, replace `sk-...` with a real key or `rm .env`.
+**`deep-claude: missing OPENROUTER_API_KEY`**
+No key in shell env, `.env`, or Keychain (service `deep-router`, account `openrouter`). See [Configuring the key](#configuring-the-key).
 
-**`deep-cco: 'cco' is not on PATH`**
-Install cco:
-```bash
-curl -fsSL https://raw.githubusercontent.com/nikvdp/cco/master/install.sh | bash
-```
+**`deep-claude: no model selected`**
+You haven't picked any models yet. Run `deep-claude pick` (or `deep-claude models add <id> <alias>`), or pass `--model <id>` explicitly.
 
-**`Missing required module: ~/.local/bin/lib/agents.sh`**
-You're on a `deep-cco` version older than `1ebac2c` that doesn't resolve cco's symlinks before redirecting `$HOME`. `git pull && ./install.sh` to fix.
+**A non-Claude model returns an empty response**
+That's the out-of-order `redacted_thinking` quirk — the proxy strips it for non-`anthropic/` models by default. If you've set `ROUTER_KEEP_THINKING=1`, unset it. (Personal endpoints don't strip; use OpenRouter mode for non-Claude reasoning models.)
 
 **Keychain prompt appears repeatedly**
 Click **Always Allow** once. macOS pins the access ACL to the `security` binary, so subsequent reads are silent — even across reboots.
 
-**`claude` not found inside the sandbox**
-cco bundles its own `claude` install in Docker mode. For native sandboxing (Seatbelt / bubblewrap), make sure `claude` is installed on your host and on `PATH`.
-
 **Argument passthrough confusion**
-The wrappers eat `--model X` themselves. Everything else passes through. Use `--` to be explicit: `deep-claude --model flash -- -p "hello"` is unambiguous.
+`deep-claude` eats its own flags (`--model`, `--endpoint`, `--base-url`, …); everything else passes through. Use `--` to be explicit: `deep-claude --model gemini -- -p "hello"`.
 
-**Want to see what the wrapper would run without actually running it?**
-Override the executable:
+**See what would run without running it**
 ```bash
-CLAUDE_BIN=/bin/echo deep-claude --model flash -p hi
-# prints: --model deepseek-v4-flash -p hi
+CLAUDE_BIN=/bin/echo deep-claude --base-url http://x --api-key k --model m -p hi
+# prints: --model m -p hi
 ```
 
 ## Development
@@ -238,12 +295,13 @@ CLAUDE_BIN=/bin/echo deep-claude --model flash -p hi
 ./test.sh
 ```
 
-The tests use `CLAUDE_BIN=/bin/echo` and `CCO_BIN=/bin/echo` to verify argument passthrough without invoking real binaries. They cover:
+The tests use `CLAUDE_BIN=/bin/echo` to verify argument handling without invoking real binaries, and
+spin up a fake upstream to exercise the proxy. They cover:
 
-- Bash syntax (`bash -n`) for every script
-- Model alias resolution (`pro` / `flash` / explicit name)
-- Argument passthrough (`-p`, `--output-format`, etc.)
-- The `--` separator semantics
+- Bash syntax (`bash -n`) and `node --check` for every script
+- Run-arg handling for OpenRouter and personal-endpoint modes (incl. the `--` separator)
+- The `models` and `endpoints` curation CLIs
+- Proxy behavior: alias resolution, `context_management` stripping, beta-header sanitizing, key injection, and thinking-block stripping for non-Claude models
 
 ## License
 

@@ -1,7 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Resolve symlinks so the script works when installed via symlink (e.g. ~/.local/bin/deep-claude).
+# deep-claude — drive Claude Code with alternate models.
+#
+#   deep-claude                         run on your default OpenRouter model
+#   deep-claude --model gemini [args]   pick a model for this run (alias or id)
+#   deep-claude pick                    interactive OpenRouter model picker
+#   deep-claude models <add|remove|list|default>   curate the OpenRouter set
+#   deep-claude endpoints <add|remove|list>        manage personal endpoints
+#   deep-claude --endpoint deepseek --model deepseek-v4-pro   use a saved endpoint
+#   deep-claude --base-url URL [--api-key-env VAR] --model M  ad-hoc endpoint
+#
+# OpenRouter is the default path. Any other Anthropic-compatible endpoint
+# (DeepSeek-direct, a local Ollama, a self-hosted gateway) is a "personal
+# endpoint" you reach with --endpoint / --base-url.
+
+# Resolve symlinks so this works when installed via symlink (~/.local/bin/...).
 SOURCE="${BASH_SOURCE[0]}"
 while [ -L "$SOURCE" ]; do
   DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
@@ -10,120 +24,499 @@ while [ -L "$SOURCE" ]; do
 done
 SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
 PROJECT_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
-ENV_FILE="$PROJECT_DIR/.env"
+ENV_FILE="${DEEP_CLAUDE_ENV_FILE:-$PROJECT_DIR/.env}"
 STATE_DIR="$PROJECT_DIR/.deep-claude-home"
 
 usage() {
   cat <<'EOF'
-Usage: deep-claude [--model pro|flash|MODEL] [claude args...]
+Usage:
+  deep-claude [--model ALIAS|ID] [claude args...]      run on OpenRouter (default)
+  deep-claude cli                                      first-run setup wizard (key + models)
+  deep-claude pick                                     pick OpenRouter models (TUI)
+  deep-claude models <add|remove|list|default> ...     curate the OpenRouter set
+  deep-claude endpoints <add|remove|list> ...          manage personal endpoints
+  deep-claude --endpoint NAME --model M [args...]      use a saved endpoint
+  deep-claude --base-url URL [--api-key-env VAR] [--api-key KEY] --model M [args...]
 
-Runs Claude Code against DeepSeek's Anthropic-compatible endpoint.
+OpenRouter is the default. Set it up once:
+  security add-generic-password -s deep-router -a openrouter -U -w   # or OPENROUTER_API_KEY in .env
+  deep-claude pick                                                   # choose your models
+  deep-claude                                                        # go
 
-Defaults:
-  --model pro     deepseek-v4-pro
+Personal endpoints (DeepSeek-direct, local models, self-hosted) are second-tier:
+  deep-claude endpoints add deepseek https://api.deepseek.com/anthropic DEEPSEEK_API_KEY
+  deep-claude --endpoint deepseek --model deepseek-v4-pro
 
-Aliases:
-  --model pro     deepseek-v4-pro
-  --model flash   deepseek-v4-flash
+Use your existing Claude setup (skills, plugins, agents, workflows, MCP servers):
+  deep-claude --inherit                  for one run, or set DEEP_CLAUDE_INHERIT=1 in .env
 
 Environment:
-  DEEPSEEK_API_KEY may be supplied via (in precedence order):
-    1. exported in the shell
-    2. .env next to this repo
-    3. macOS Keychain item: service "deep-claude", account "deepseek"
-       Add with:
-         security add-generic-password -s deep-claude -a deepseek -U -w
-  CLAUDE_BIN may be set to override the claude executable.
+  OPENROUTER_API_KEY   default-path key (env, .env, or Keychain -s deep-router -a openrouter).
+  DEEP_CLAUDE_INHERIT  "1" => link your ~/.claude skills/plugins/agents/etc. + MCP servers
+                         into deep-claude (your Anthropic login is never imported).
+  CLAUDE_BIN           override the claude executable.
 EOF
 }
 
-if [[ -f "$ENV_FILE" ]]; then
-  set -a
-  # shellcheck disable=SC1090
-  source "$ENV_FILE"
-  set +a
-fi
-
-# Treat the .env.example placeholder as unset, so a stale .env can't shadow
-# a real key in Keychain or shell env.
-if [[ "${DEEPSEEK_API_KEY:-}" == "sk-..." ]]; then
-  unset DEEPSEEK_API_KEY
-fi
-
-# Fall back to macOS Keychain when DEEPSEEK_API_KEY isn't set via env or .env.
-if [[ -z "${DEEPSEEK_API_KEY:-}" ]] && command -v security >/dev/null 2>&1; then
-  if keychain_key="$(security find-generic-password -s deep-claude -a deepseek -w 2>/dev/null)"; then
-    export DEEPSEEK_API_KEY="$keychain_key"
+# Load .env (KEY=value lines) into the environment.
+load_env() {
+  if [[ -f "$ENV_FILE" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$ENV_FILE"
+    set +a
   fi
-fi
+}
 
-model="deepseek-v4-pro"
-args=()
+# --- .env get/set helpers (comma-list aware) --------------------------------
+env_get() {
+  local key="$1" line val=""
+  [[ -f "$ENV_FILE" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" == "$key="* ]] && val="${line#"$key"=}"
+  done <"$ENV_FILE"
+  val="${val%\"}"
+  val="${val#\"}"
+  printf '%s' "$val"
+}
 
-while (($#)); do
-  case "$1" in
-    --)
-      shift
-      while (($#)); do
-        args+=("$1")
-        shift
-      done
-      ;;
-    --help|-h)
-      usage
-      exit 0
-      ;;
-    --model)
-      if (($# < 2)); then
-        echo "deep-claude: --model requires a value: pro, flash, or a full model name" >&2
-        exit 2
-      fi
-      case "$2" in
-        pro) model="deepseek-v4-pro" ;;
-        flash) model="deepseek-v4-flash" ;;
-        *) model="$2" ;;
-      esac
-      shift 2
-      ;;
-    --model=*)
-      value="${1#--model=}"
-      case "$value" in
-        pro) model="deepseek-v4-pro" ;;
-        flash) model="deepseek-v4-flash" ;;
-        *) model="$value" ;;
-      esac
-      shift
-      ;;
-    *)
-      args+=("$1")
-      shift
-      ;;
+env_set() {
+  local key="$1" value="$2" tmp found=0 line
+  [[ -f "$ENV_FILE" ]] || : >"$ENV_FILE"
+  tmp="$(mktemp)"
+  # Quote the value: .env is sourced, so unquoted shell metacharacters in a
+  # value (| in endpoint specs, & in URLs) would be interpreted. env_get strips
+  # the quotes back off on read.
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" == "$key="* ]]; then
+      printf '%s="%s"\n' "$key" "$value" >>"$tmp"
+      found=1
+    else
+      printf '%s\n' "$line" >>"$tmp"
+    fi
+  done <"$ENV_FILE"
+  ((found)) || printf '%s="%s"\n' "$key" "$value" >>"$tmp"
+  mv "$tmp" "$ENV_FILE"
+}
+
+join_csv() {
+  local out="" item
+  for item in "$@"; do
+    [[ -z "$item" ]] && continue
+    out="${out:+$out,}$item"
+  done
+  printf '%s' "$out"
+}
+
+# --- OpenRouter model curation ----------------------------------------------
+models_list() {
+  local models aliases def
+  models="$(env_get ROUTER_MODELS)"
+  aliases="$(env_get ROUTER_ALIASES)"
+  def="$(env_get ROUTER_DEFAULT_MODEL)"
+  echo "Curated models (ROUTER_MODELS):"
+  if [[ -n "$models" ]]; then
+    IFS=',' read -ra arr <<<"$models"
+    for m in ${arr[@]+"${arr[@]}"}; do [[ -n "${m// /}" ]] && echo "  ${m// /}"; done
+  else echo "  (none — run: deep-claude pick)"; fi
+  echo "Aliases (ROUTER_ALIASES):"
+  if [[ -n "$aliases" ]]; then
+    IFS=',' read -ra arr <<<"$aliases"
+    for a in ${arr[@]+"${arr[@]}"}; do [[ -n "${a// /}" ]] && echo "  ${a// /}"; done
+  else echo "  (none)"; fi
+  echo "Default (ROUTER_DEFAULT_MODEL): ${def:-(none)}"
+}
+
+models_add() {
+  local id="$1" alias="${2:-}"
+  [[ -z "$id" ]] && { echo "deep-claude: 'models add' needs an OpenRouter model id" >&2; exit 2; }
+  local cur kept=() m
+  cur="$(env_get ROUTER_MODELS)"
+  IFS=',' read -ra arr <<<"$cur"
+  for m in ${arr[@]+"${arr[@]}"}; do
+    m="${m// /}"; [[ -z "$m" || "$m" == "$id" ]] && continue; kept+=("$m")
+  done
+  kept+=("$id")
+  env_set ROUTER_MODELS "$(join_csv ${kept[@]+"${kept[@]}"})"
+  if [[ -n "$alias" ]]; then
+    local acur akept=() p
+    acur="$(env_get ROUTER_ALIASES)"
+    IFS=',' read -ra aarr <<<"$acur"
+    for p in ${aarr[@]+"${aarr[@]}"}; do
+      p="${p// /}"; [[ -z "$p" || "${p%%=*}" == "$alias" ]] && continue; akept+=("$p")
+    done
+    akept+=("$alias=$id")
+    env_set ROUTER_ALIASES "$(join_csv ${akept[@]+"${akept[@]}"})"
+  fi
+  echo "Added ${id}${alias:+ (alias: $alias)}."
+  models_list
+}
+
+models_remove() {
+  local token="$1"
+  [[ -z "$token" ]] && { echo "deep-claude: 'models remove' needs an id or alias" >&2; exit 2; }
+  local acur p akept=() target="$token"
+  acur="$(env_get ROUTER_ALIASES)"
+  IFS=',' read -ra aarr <<<"$acur"
+  for p in ${aarr[@]+"${aarr[@]}"}; do
+    p="${p// /}"; [[ -z "$p" ]] && continue
+    [[ "${p%%=*}" == "$token" ]] && target="${p#*=}"
+  done
+  akept=()
+  for p in ${aarr[@]+"${aarr[@]}"}; do
+    p="${p// /}"; [[ -z "$p" ]] && continue
+    [[ "${p%%=*}" == "$token" || "${p#*=}" == "$target" ]] && continue
+    akept+=("$p")
+  done
+  env_set ROUTER_ALIASES "$(join_csv ${akept[@]+"${akept[@]}"})"
+  local cur kept=() m
+  cur="$(env_get ROUTER_MODELS)"
+  IFS=',' read -ra arr <<<"$cur"
+  for m in ${arr[@]+"${arr[@]}"}; do
+    m="${m// /}"; [[ -z "$m" || "$m" == "$target" || "$m" == "$token" ]] && continue; kept+=("$m")
+  done
+  env_set ROUTER_MODELS "$(join_csv ${kept[@]+"${kept[@]}"})"
+  echo "Removed ${token}."
+  models_list
+}
+
+models_default() {
+  local token="$1"
+  [[ -z "$token" ]] && { echo "deep-claude: 'models default' needs an alias or id" >&2; exit 2; }
+  env_set ROUTER_DEFAULT_MODEL "$token"
+  echo "Default model set to ${token}."
+}
+
+models_dispatch() {
+  local sub="${1:-list}"
+  [[ $# -gt 0 ]] && shift || true
+  case "$sub" in
+    list) models_list ;;
+    add) models_add "${1:-}" "${2:-}" ;;
+    remove | rm) models_remove "${1:-}" ;;
+    default) models_default "${1:-}" ;;
+    *) echo "deep-claude: unknown 'models' subcommand: $sub" >&2; usage; exit 2 ;;
   esac
-done
+}
 
-api_key="${DEEPSEEK_API_KEY:-}"
-if [[ -z "$api_key" ]]; then
-  echo "deep-claude: missing DEEPSEEK_API_KEY." >&2
-  echo "  Set it in the shell, in $ENV_FILE, or store it in macOS Keychain:" >&2
-  echo "    security add-generic-password -s deep-claude -a deepseek -U -w" >&2
-  exit 1
-fi
+# --- Personal endpoints (DEEP_ENDPOINTS = name|url|KEYENV,...) ---------------
+endpoint_lookup() { # name -> prints "url|keyenv" or empty
+  local name="$1" cur p
+  cur="$(env_get DEEP_ENDPOINTS)"
+  IFS=',' read -ra arr <<<"$cur"
+  for p in ${arr[@]+"${arr[@]}"}; do
+    [[ "${p%%|*}" == "$name" ]] && { printf '%s' "${p#*|}"; return 0; }
+  done
+  return 1
+}
 
-mkdir -p "$STATE_DIR/home" "$STATE_DIR/config" "$STATE_DIR/cache" "$STATE_DIR/data" "$STATE_DIR/state"
+endpoints_list() {
+  local cur p
+  cur="$(env_get DEEP_ENDPOINTS)"
+  echo "Personal endpoints (DEEP_ENDPOINTS):"
+  if [[ -z "$cur" ]]; then echo "  (none)"; return; fi
+  IFS=',' read -ra arr <<<"$cur"
+  for p in ${arr[@]+"${arr[@]}"}; do
+    [[ -z "$p" ]] && continue
+    local name="${p%%|*}" rest="${p#*|}" url="${p#*|}" keyenv
+    url="${rest%%|*}"; keyenv="${rest#*|}"
+    printf '  %-12s %s%s\n' "$name" "$url" "${keyenv:+   (key: \$$keyenv)}"
+  done
+}
 
-export HOME="$STATE_DIR/home"
-export XDG_CONFIG_HOME="$STATE_DIR/config"
-export XDG_CACHE_HOME="$STATE_DIR/cache"
-export XDG_DATA_HOME="$STATE_DIR/data"
-export XDG_STATE_HOME="$STATE_DIR/state"
+endpoints_add() {
+  local name="$1" url="$2" keyenv="${3:-}"
+  [[ -z "$name" || -z "$url" ]] && { echo "deep-claude: 'endpoints add' needs <name> <base-url> [KEY_ENV_VAR]" >&2; exit 2; }
+  case "$name$url$keyenv" in *,* | *\|*) echo "deep-claude: name/url/key-env must not contain ',' or '|'" >&2; exit 2 ;; esac
+  local cur kept=() p
+  cur="$(env_get DEEP_ENDPOINTS)"
+  IFS=',' read -ra arr <<<"$cur"
+  for p in ${arr[@]+"${arr[@]}"}; do
+    [[ -z "$p" || "${p%%|*}" == "$name" ]] && continue; kept+=("$p")
+  done
+  kept+=("$name|$url|$keyenv")
+  env_set DEEP_ENDPOINTS "$(join_csv ${kept[@]+"${kept[@]}"})"
+  echo "Saved endpoint '$name'."
+  endpoints_list
+}
 
-export ANTHROPIC_BASE_URL="https://api.deepseek.com/anthropic"
-export ANTHROPIC_AUTH_TOKEN="$api_key"
-export ANTHROPIC_API_KEY="$api_key"
-export ANTHROPIC_MODEL="$model"
+endpoints_remove() {
+  local name="$1"
+  [[ -z "$name" ]] && { echo "deep-claude: 'endpoints remove' needs a name" >&2; exit 2; }
+  local cur kept=() p
+  cur="$(env_get DEEP_ENDPOINTS)"
+  IFS=',' read -ra arr <<<"$cur"
+  for p in ${arr[@]+"${arr[@]}"}; do
+    [[ -z "$p" || "${p%%|*}" == "$name" ]] && continue; kept+=("$p")
+  done
+  env_set DEEP_ENDPOINTS "$(join_csv ${kept[@]+"${kept[@]}"})"
+  echo "Removed endpoint '$name'."
+  endpoints_list
+}
 
-if ((${#args[@]})); then
-  exec "${CLAUDE_BIN:-claude}" --model "$model" "${args[@]}"
-else
-  exec "${CLAUDE_BIN:-claude}" --model "$model"
-fi
+endpoints_dispatch() {
+  local sub="${1:-list}"
+  [[ $# -gt 0 ]] && shift || true
+  case "$sub" in
+    list) endpoints_list ;;
+    add) endpoints_add "${1:-}" "${2:-}" "${3:-}" ;;
+    remove | rm) endpoints_remove "${1:-}" ;;
+    *) echo "deep-claude: unknown 'endpoints' subcommand: $sub" >&2; usage; exit 2 ;;
+  esac
+}
+
+# --- key resolution + picker ------------------------------------------------
+resolve_openrouter_key() {
+  local key="${OPENROUTER_API_KEY:-}"
+  [[ "$key" == "sk-or-..." ]] && key=""
+  if [[ -z "$key" ]] && command -v security >/dev/null 2>&1; then
+    key="$(security find-generic-password -s deep-router -a openrouter -w 2>/dev/null || true)"
+  fi
+  printf '%s' "$key"
+}
+
+run_pick() {
+  command -v node >/dev/null 2>&1 || { echo "deep-claude: node is required for the picker" >&2; exit 1; }
+  local key; key="$(resolve_openrouter_key)"
+  [[ -z "$key" ]] && { echo "deep-claude: missing OPENROUTER_API_KEY (env, .env, or Keychain -s deep-router -a openrouter)" >&2; exit 1; }
+  OPENROUTER_API_KEY="$key" DEEP_CLAUDE_ENV_FILE="$ENV_FILE" exec node "$SCRIPT_DIR/deep-claude-pick"
+}
+
+# Ensure a key and a curated model set exist, running the key wizard and/or the
+# model picker as needed. Each TUI runs as its own clean foreground process (no
+# nesting), so raw-mode input can't leak between them. Pass "interactive" to
+# always run the picker and print a closing note (the explicit `cli` command).
+run_setup() {
+  command -v node >/dev/null 2>&1 || { echo "deep-claude: node is required for setup" >&2; exit 1; }
+  local interactive=""
+  [[ "${1:-}" == "interactive" ]] && interactive=1
+
+  if [[ -z "$(resolve_openrouter_key)" ]]; then
+    OPENROUTER_API_KEY="" DEEP_CLAUDE_ENV_FILE="$ENV_FILE" node "$SCRIPT_DIR/deep-claude-cli" || return 1
+    load_env
+  fi
+  local key; key="$(resolve_openrouter_key)"
+  [[ -z "$key" ]] && return 1
+
+  if [[ -n "$interactive" || -z "$(env_get ROUTER_MODELS)" ]]; then
+    OPENROUTER_API_KEY="$key" DEEP_CLAUDE_ENV_FILE="$ENV_FILE" node "$SCRIPT_DIR/deep-claude-pick" || true
+    load_env
+  fi
+
+  [[ -n "$interactive" ]] && printf '\n  \033[32m✓\033[0m Setup complete. Run: \033[1mdeep-claude\033[0m\n\n'
+  return 0
+}
+
+# Resolve a raw model token (alias name, full id, or empty) into an OpenRouter
+# model id, consulting ROUTER_ALIASES and ROUTER_DEFAULT_MODEL.
+resolve_router_model() {
+  local m="$1" aliases p
+  [[ -z "$m" ]] && m="$(env_get ROUTER_DEFAULT_MODEL)"
+  aliases="$(env_get ROUTER_ALIASES)"
+  if [[ -n "$aliases" ]]; then
+    IFS=',' read -ra prs <<<"$aliases"
+    for p in ${prs[@]+"${prs[@]}"}; do
+      p="${p// /}"; [[ -z "$p" ]] && continue
+      [[ "${p%%=*}" == "$m" ]] && { m="${p#*=}"; break; }
+    done
+  fi
+  printf '%s' "$m"
+}
+
+# True if something is already listening on 127.0.0.1:<port>.
+port_in_use() {
+  (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
+}
+
+# Find a free local port, starting at ROUTER_PORT (default 8787) and stepping up.
+# 8787 is a popular default (wrangler/workerd, etc.), so we never assume it.
+find_free_port() {
+  local p="${ROUTER_PORT:-8787}" i
+  for i in $(seq 0 200); do
+    port_in_use "$p" || { printf '%s' "$p"; return 0; }
+    p=$((p + 1))
+  done
+  printf '%s' "${ROUTER_PORT:-8787}"
+}
+
+# Bring the user's real ~/.claude config (skills, plugins, agents, workflows,
+# rules, hooks, commands, settings, CLAUDE.md) into the isolated home via
+# symlinks, and merge their MCP servers — but NOT the Anthropic login/history
+# (which would conflict with the OpenRouter routing). Opt in with
+# DEEP_CLAUDE_INHERIT=1 (.env) or the --inherit flag.
+inherit_config() {
+  local real="$HOME/.claude" dest="$STATE_DIR/home/.claude"
+  [[ -d "$real" ]] || return 0
+  mkdir -p "$dest"
+  local item src dst
+  for item in skills agents workflows rules hooks commands plugins settings.json CLAUDE.md; do
+    src="$real/$item"; dst="$dest/$item"
+    [[ -e "$src" ]] || continue
+    if [[ -L "$dst" ]]; then
+      ln -sfn "$src" "$dst"           # refresh existing symlink
+    else
+      [[ -e "$dst" ]] && rm -rf "$dst" # drop the isolated default, then link
+      ln -s "$src" "$dst"
+    fi
+  done
+  # Merge MCP servers from ~/.claude.json into the isolated config's .claude.json
+  # (config wins on conflict, so deep-claude-side additions are preserved).
+  if command -v node >/dev/null 2>&1 && [[ -f "$HOME/.claude.json" ]]; then
+    DC_SRC="$HOME/.claude.json" DC_DST="$dest/.claude.json" node -e '
+      const fs=require("fs");
+      let src={}; try{src=JSON.parse(fs.readFileSync(process.env.DC_SRC,"utf8"))}catch(e){}
+      let dst={}; try{dst=JSON.parse(fs.readFileSync(process.env.DC_DST,"utf8"))}catch(e){}
+      dst.mcpServers=Object.assign({}, src.mcpServers||{}, dst.mcpServers||{});
+      fs.writeFileSync(process.env.DC_DST, JSON.stringify(dst,null,2));
+    ' 2>/dev/null || true
+  fi
+}
+
+# Point Claude Code's state at our isolated home without touching $HOME (the
+# macOS login keychain lives under $HOME/Library/Keychains).
+set_claude_state() {
+  mkdir -p "$STATE_DIR/home" "$STATE_DIR/config" "$STATE_DIR/cache" "$STATE_DIR/data" "$STATE_DIR/state"
+  export CLAUDE_CONFIG_DIR="$STATE_DIR/home/.claude"
+  export XDG_CONFIG_HOME="$STATE_DIR/config"
+  export XDG_CACHE_HOME="$STATE_DIR/cache"
+  export XDG_DATA_HOME="$STATE_DIR/data"
+  export XDG_STATE_HOME="$STATE_DIR/state"
+  # NB: use `if`, not `&& inherit_config` — a false `[[ ]]` as the function's
+  # last command would make set_claude_state return non-zero and, under set -e,
+  # abort the run for everyone who hasn't enabled inherit.
+  if [[ "${DEEP_CLAUDE_INHERIT:-}" == "1" ]]; then inherit_config; fi
+}
+
+# --- run: OpenRouter (default) ----------------------------------------------
+run_openrouter() {
+  local req_model="$1"; shift
+  local args=("$@")
+
+  command -v node >/dev/null 2>&1 || { echo "deep-claude: node is required for OpenRouter mode" >&2; exit 1; }
+
+  # First run (no key or no models yet): walk setup, then carry on.
+  local ran_wizard=""
+  if [[ -z "$(resolve_openrouter_key)" || -z "$(env_get ROUTER_MODELS)" ]]; then
+    run_setup || { echo "deep-claude: setup didn't complete." >&2; exit 1; }
+    load_env
+    ran_wizard=1
+  fi
+
+  local key; key="$(resolve_openrouter_key)"
+  [[ -z "$key" ]] && { echo "deep-claude: setup didn't complete — no OpenRouter key." >&2; exit 1; }
+  local model; model="$(resolve_router_model "$req_model")"
+  [[ -z "$model" ]] && { echo "deep-claude: no model selected. Run 'deep-claude pick'." >&2; exit 1; }
+
+  # Clear setup output so the session starts on a clean screen.
+  [[ -n "$ran_wizard" ]] && { command -v clear >/dev/null 2>&1 && clear || printf '\033c'; }
+
+  # Pick a free port — 8787 (or ROUTER_PORT) is often taken (wrangler/workerd, …).
+  local host="${ROUTER_HOST:-127.0.0.1}"
+  local port; port="$(find_free_port)"
+
+  mkdir -p "$STATE_DIR"
+  ROUTER_PORT="$port" ROUTER_HOST="$host" OPENROUTER_API_KEY="$key" \
+    node "$SCRIPT_DIR/deep-claude-proxy" >"$STATE_DIR/proxy.log" 2>&1 &
+  local pid=$!
+  trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT INT TERM
+
+  # Wait until OUR proxy answers (the /health marker guards against binding to
+  # some unrelated service that happened to grab the port).
+  local ready=""
+  for _ in $(seq 1 50); do
+    if curl -fsS "http://$host:$port/health" 2>/dev/null | grep -q 'deep-claude-proxy'; then ready=1; break; fi
+    kill -0 "$pid" 2>/dev/null || { echo "deep-claude: proxy failed to start (see $STATE_DIR/proxy.log)." >&2; exit 1; }
+    sleep 0.1
+  done
+  [[ -z "$ready" ]] && { echo "deep-claude: proxy did not become ready on http://$host:$port (see $STATE_DIR/proxy.log)." >&2; exit 1; }
+
+  set_claude_state
+  export ANTHROPIC_BASE_URL="http://$host:$port"
+  export ANTHROPIC_AUTH_TOKEN="router"
+  export ANTHROPIC_API_KEY=""
+  export ANTHROPIC_MODEL="$model"
+  # Map the switch slots (set by `deep-claude pick`) so /model can flip between
+  # them in-session. An unset slot falls back to the current model.
+  local s_opus s_sonnet s_haiku s_fable
+  s_opus="$(env_get ROUTER_SLOT_OPUS)"; s_sonnet="$(env_get ROUTER_SLOT_SONNET)"
+  s_haiku="$(env_get ROUTER_SLOT_HAIKU)"; s_fable="$(env_get ROUTER_SLOT_FABLE)"
+  export ANTHROPIC_DEFAULT_OPUS_MODEL="${s_opus:-$model}"
+  export ANTHROPIC_DEFAULT_SONNET_MODEL="${s_sonnet:-$model}"
+  export ANTHROPIC_DEFAULT_HAIKU_MODEL="${s_haiku:-$model}"
+  export ANTHROPIC_DEFAULT_FABLE_MODEL="${s_fable:-$model}"
+  export ANTHROPIC_SMALL_FAST_MODEL="${s_haiku:-$model}"
+  export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY="1"
+  export CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS="1"
+
+  if ((${#args[@]})); then "${CLAUDE_BIN:-claude}" --model "$model" "${args[@]}"; else "${CLAUDE_BIN:-claude}" --model "$model"; fi
+  exit $?
+}
+
+# --- run: personal endpoint (direct, no proxy) ------------------------------
+run_endpoint() {
+  local url="$1" key="$2" model="$3"; shift 3
+  local args=("$@")
+  [[ -z "$model" ]] && { echo "deep-claude: a personal endpoint needs --model <id>." >&2; exit 1; }
+
+  set_claude_state
+  export ANTHROPIC_BASE_URL="$url"
+  export ANTHROPIC_AUTH_TOKEN="${key:-none}"
+  export ANTHROPIC_API_KEY="${key:-none}"
+  export ANTHROPIC_MODEL="$model"
+
+  if ((${#args[@]})); then exec "${CLAUDE_BIN:-claude}" --model "$model" "${args[@]}"; else exec "${CLAUDE_BIN:-claude}" --model "$model"; fi
+}
+
+# --- run dispatch -----------------------------------------------------------
+run_main() {
+  local model="" endpoint="" base_url="" api_key="" api_key_env=""
+  local args=()
+  while (($#)); do
+    case "$1" in
+      --) shift; while (($#)); do args+=("$1"); shift; done ;;
+      --model) [[ $# -lt 2 ]] && { echo "deep-claude: --model needs a value" >&2; exit 2; }; model="$2"; shift 2 ;;
+      --model=*) model="${1#--model=}"; shift ;;
+      --endpoint) [[ $# -lt 2 ]] && { echo "deep-claude: --endpoint needs a name" >&2; exit 2; }; endpoint="$2"; shift 2 ;;
+      --endpoint=*) endpoint="${1#--endpoint=}"; shift ;;
+      --base-url) [[ $# -lt 2 ]] && { echo "deep-claude: --base-url needs a URL" >&2; exit 2; }; base_url="$2"; shift 2 ;;
+      --base-url=*) base_url="${1#--base-url=}"; shift ;;
+      --api-key) [[ $# -lt 2 ]] && { echo "deep-claude: --api-key needs a value" >&2; exit 2; }; api_key="$2"; shift 2 ;;
+      --api-key=*) api_key="${1#--api-key=}"; shift ;;
+      --api-key-env) [[ $# -lt 2 ]] && { echo "deep-claude: --api-key-env needs a var name" >&2; exit 2; }; api_key_env="$2"; shift 2 ;;
+      --api-key-env=*) api_key_env="${1#--api-key-env=}"; shift ;;
+      --inherit) export DEEP_CLAUDE_INHERIT=1; shift ;;
+      --no-inherit) export DEEP_CLAUDE_INHERIT=0; shift ;;
+      *) args+=("$1"); shift ;;
+    esac
+  done
+
+  # Saved endpoint -> resolve into base_url + key env.
+  if [[ -n "$endpoint" ]]; then
+    local spec; spec="$(endpoint_lookup "$endpoint")" || { echo "deep-claude: no saved endpoint '$endpoint' (see: deep-claude endpoints list)" >&2; exit 1; }
+    base_url="${spec%%|*}"
+    api_key_env="${spec#*|}"
+  fi
+
+  if [[ -n "$base_url" ]]; then
+    local key="$api_key"
+    if [[ -z "$key" && -n "$api_key_env" ]]; then
+      key="${!api_key_env:-}"
+      [[ -z "$key" ]] && key="$(env_get "$api_key_env")"
+    fi
+    run_endpoint "$base_url" "$key" "$model" ${args[@]+"${args[@]}"}
+  else
+    run_openrouter "$model" ${args[@]+"${args[@]}"}
+  fi
+}
+
+# --- top-level dispatch -----------------------------------------------------
+load_env
+case "${1:-}" in
+  cli | setup) shift; run_setup interactive ;;
+  pick) shift; run_pick ;;
+  models) shift; models_dispatch "$@" ;;
+  endpoints) shift; endpoints_dispatch "$@" ;;
+  serve) shift; exec node "$SCRIPT_DIR/deep-claude-proxy" "$@" ;;
+  -h | --help | help) usage ;;
+  *) run_main "$@" ;;
+esac
