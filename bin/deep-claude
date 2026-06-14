@@ -241,7 +241,19 @@ endpoints_add() {
   echo "  · and in OpenRouter mode, '$name/*' models now route through this"
   echo "    endpoint (your key) instead of OpenRouter — often faster."
   if [[ -n "$keyenv" ]]; then
-    echo "  · key comes from \$$keyenv (shell, .env, or Keychain -s deep-claude -a $name)."
+    # Is the key actually resolvable yet? (shell env, .env, or Keychain)
+    local kv="${!keyenv:-}"
+    [[ -z "$kv" ]] && kv="$(env_get "$keyenv")"
+    if [[ -z "$kv" ]] && command -v security >/dev/null 2>&1; then
+      kv="$(security find-generic-password -s deep-claude -a "$name" -w 2>/dev/null || true)"
+    fi
+    if [[ -n "$kv" ]]; then
+      echo "  · key (\$$keyenv) found ✓ — you're ready to go."
+    else
+      echo "  · key (\$$keyenv) NOT found yet. Add it one of these ways:"
+      echo "      security add-generic-password -s deep-claude -a $name -U -w   # Keychain (paste key)"
+      echo "      echo '$keyenv=\"sk-...\"' >> \"$ENV_FILE\""
+    fi
   fi
   endpoints_list
 }
