@@ -277,12 +277,29 @@ run_pick() {
   OPENROUTER_API_KEY="$key" DEEP_CLAUDE_ENV_FILE="$ENV_FILE" exec node "$SCRIPT_DIR/deep-claude-pick"
 }
 
-# The setup wizard (key entry + model picker). Runs in the foreground and
-# returns, so callers can reload .env and continue.
-run_cli() {
+# Ensure a key and a curated model set exist, running the key wizard and/or the
+# model picker as needed. Each TUI runs as its own clean foreground process (no
+# nesting), so raw-mode input can't leak between them. Pass "interactive" to
+# always run the picker and print a closing note (the explicit `cli` command).
+run_setup() {
   command -v node >/dev/null 2>&1 || { echo "deep-claude: node is required for setup" >&2; exit 1; }
+  local interactive=""
+  [[ "${1:-}" == "interactive" ]] && interactive=1
+
+  if [[ -z "$(resolve_openrouter_key)" ]]; then
+    OPENROUTER_API_KEY="" DEEP_CLAUDE_ENV_FILE="$ENV_FILE" node "$SCRIPT_DIR/deep-claude-cli" || return 1
+    load_env
+  fi
   local key; key="$(resolve_openrouter_key)"
-  OPENROUTER_API_KEY="$key" DEEP_CLAUDE_ENV_FILE="$ENV_FILE" node "$SCRIPT_DIR/deep-claude-cli"
+  [[ -z "$key" ]] && return 1
+
+  if [[ -n "$interactive" || -z "$(env_get ROUTER_MODELS)" ]]; then
+    OPENROUTER_API_KEY="$key" DEEP_CLAUDE_ENV_FILE="$ENV_FILE" node "$SCRIPT_DIR/deep-claude-pick" || true
+    load_env
+  fi
+
+  [[ -n "$interactive" ]] && printf '\n  \033[32m✓\033[0m Setup complete. Run: \033[1mdeep-claude\033[0m\n\n'
+  return 0
 }
 
 # Resolve a raw model token (alias name, full id, or empty) into an OpenRouter
@@ -299,6 +316,22 @@ resolve_router_model() {
     done
   fi
   printf '%s' "$m"
+}
+
+# True if something is already listening on 127.0.0.1:<port>.
+port_in_use() {
+  (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
+}
+
+# Find a free local port, starting at ROUTER_PORT (default 8787) and stepping up.
+# 8787 is a popular default (wrangler/workerd, etc.), so we never assume it.
+find_free_port() {
+  local p="${ROUTER_PORT:-8787}" i
+  for i in $(seq 0 200); do
+    port_in_use "$p" || { printf '%s' "$p"; return 0; }
+    p=$((p + 1))
+  done
+  printf '%s' "${ROUTER_PORT:-8787}"
 }
 
 # Point Claude Code's state at our isolated home without touching $HOME (the
@@ -319,37 +352,41 @@ run_openrouter() {
 
   command -v node >/dev/null 2>&1 || { echo "deep-claude: node is required for OpenRouter mode" >&2; exit 1; }
 
-  # First run (no key yet): launch the setup wizard, then carry on.
+  # First run (no key or no models yet): walk setup, then carry on.
+  local ran_wizard=""
+  if [[ -z "$(resolve_openrouter_key)" || -z "$(env_get ROUTER_MODELS)" ]]; then
+    run_setup || { echo "deep-claude: setup didn't complete." >&2; exit 1; }
+    load_env
+    ran_wizard=1
+  fi
+
   local key; key="$(resolve_openrouter_key)"
-  if [[ -z "$key" ]]; then
-    run_cli
-    load_env
-    key="$(resolve_openrouter_key)"
-    [[ -z "$key" ]] && { echo "deep-claude: setup didn't complete — no OpenRouter key." >&2; exit 1; }
-  fi
-
-  # Resolve the model; if none is curated yet, run the wizard (picker) once.
+  [[ -z "$key" ]] && { echo "deep-claude: setup didn't complete — no OpenRouter key." >&2; exit 1; }
   local model; model="$(resolve_router_model "$req_model")"
-  if [[ -z "$model" ]]; then
-    run_cli
-    load_env
-    model="$(resolve_router_model "$req_model")"
-    [[ -z "$model" ]] && { echo "deep-claude: no model selected. Run 'deep-claude pick'." >&2; exit 1; }
-  fi
+  [[ -z "$model" ]] && { echo "deep-claude: no model selected. Run 'deep-claude pick'." >&2; exit 1; }
 
-  local port="${ROUTER_PORT:-8787}" host="${ROUTER_HOST:-127.0.0.1}"
+  # Clear setup output so the session starts on a clean screen.
+  [[ -n "$ran_wizard" ]] && { command -v clear >/dev/null 2>&1 && clear || printf '\033c'; }
+
+  # Pick a free port — 8787 (or ROUTER_PORT) is often taken (wrangler/workerd, …).
+  local host="${ROUTER_HOST:-127.0.0.1}"
+  local port; port="$(find_free_port)"
+
+  mkdir -p "$STATE_DIR"
   ROUTER_PORT="$port" ROUTER_HOST="$host" OPENROUTER_API_KEY="$key" \
-    node "$SCRIPT_DIR/deep-claude-proxy" &
+    node "$SCRIPT_DIR/deep-claude-proxy" >"$STATE_DIR/proxy.log" 2>&1 &
   local pid=$!
   trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT INT TERM
 
+  # Wait until OUR proxy answers (the /health marker guards against binding to
+  # some unrelated service that happened to grab the port).
   local ready=""
   for _ in $(seq 1 50); do
-    if curl -fsS "http://$host:$port/health" >/dev/null 2>&1; then ready=1; break; fi
-    kill -0 "$pid" 2>/dev/null || { echo "deep-claude: proxy exited before becoming ready." >&2; exit 1; }
+    if curl -fsS "http://$host:$port/health" 2>/dev/null | grep -q 'deep-claude-proxy'; then ready=1; break; fi
+    kill -0 "$pid" 2>/dev/null || { echo "deep-claude: proxy failed to start (see $STATE_DIR/proxy.log)." >&2; exit 1; }
     sleep 0.1
   done
-  [[ -z "$ready" ]] && { echo "deep-claude: proxy did not become ready on http://$host:$port" >&2; exit 1; }
+  [[ -z "$ready" ]] && { echo "deep-claude: proxy did not become ready on http://$host:$port (see $STATE_DIR/proxy.log)." >&2; exit 1; }
 
   set_claude_state
   export ANTHROPIC_BASE_URL="http://$host:$port"
@@ -425,7 +462,7 @@ run_main() {
 # --- top-level dispatch -----------------------------------------------------
 load_env
 case "${1:-}" in
-  cli | setup) shift; run_cli ;;
+  cli | setup) shift; run_setup interactive ;;
   pick) shift; run_pick ;;
   models) shift; models_dispatch "$@" ;;
   endpoints) shift; endpoints_dispatch "$@" ;;

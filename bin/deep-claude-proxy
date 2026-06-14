@@ -309,7 +309,7 @@ const server = http.createServer(async (req, res) => {
   const path = url.split('?')[0];
 
   if (req.method === 'GET' && (path === '/health' || path === '/')) {
-    return sendJson(res, 200, { status: 'ok', upstream: UPSTREAM, models: [...ALLOWED] });
+    return sendJson(res, 200, { service: 'deep-claude-proxy', status: 'ok', upstream: UPSTREAM, models: [...ALLOWED] });
   }
   if (req.method === 'GET' && path === '/v1/models') {
     return handleModels(res);
