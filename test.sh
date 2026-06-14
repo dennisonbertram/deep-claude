@@ -198,4 +198,46 @@ upstream.listen(UP, '127.0.0.1', () => {
 });
 NODE
 
+# deep-claude proxy: per-model DIRECT routing via DEEP_ENDPOINTS.
+node - <<'NODE'
+const http = require('http');
+const { spawn } = require('child_process');
+const OR = 8905, DIR = 8906, PROXY = 8907;
+let hitOR = null, hitDIR = null;
+const mk = (sink) => http.createServer((req, res) => {
+  let b = ''; req.on('data', c => (b += c));
+  req.on('end', () => { sink({ headers: req.headers, body: JSON.parse(b || '{}') });
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ id: 'm', type: 'message', role: 'assistant', content: [], model: 'x' })); });
+});
+function die(m) { console.error('FAIL:', m); process.exit(1); }
+const sOR = mk(x => (hitOR = x)), sDIR = mk(x => (hitDIR = x));
+sOR.listen(OR, '127.0.0.1', () => sDIR.listen(DIR, '127.0.0.1', () => {
+  const proxy = spawn('node', [__dirname + '/bin/deep-claude-proxy'], {
+    env: { ...process.env, ROUTER_PORT: String(PROXY), OPENROUTER_API_KEY: 'ork',
+      OPENROUTER_BASE_URL: `http://127.0.0.1:${OR}`,
+      DEEP_ENDPOINTS: `myprov|http://127.0.0.1:${DIR}|MYKEY`, MYKEY: 'secret',
+      ROUTER_MODELS: 'myprov/foo,other/bar' },
+    stdio: 'ignore',
+  });
+  const done = (ok) => { proxy.kill(); sOR.close(); sDIR.close(); process.exit(ok ? 0 : 1); };
+  const post = (model) => fetch(`http://127.0.0.1:${PROXY}/v1/messages`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model, max_tokens: 8, messages: [{ role: 'user', content: 'hi' }] }) });
+  (async () => {
+    for (let i = 0; i < 50; i++) { try { if ((await fetch(`http://127.0.0.1:${PROXY}/health`)).ok) break; } catch {} await new Promise(r => setTimeout(r, 100)); }
+    await post('myprov/foo');   // -> direct
+    if (!hitDIR) die('direct endpoint not hit for myprov/*');
+    if (hitDIR.body.model !== 'foo') die('prefix not stripped for direct: ' + hitDIR.body.model);
+    if (hitDIR.headers['x-api-key'] !== 'secret') die('direct key not sent: ' + hitDIR.headers['x-api-key']);
+    hitOR = null;
+    await post('other/bar');    // -> OpenRouter
+    if (!hitOR) die('OpenRouter not hit for other/*');
+    if (hitOR.body.model !== 'other/bar') die('OpenRouter model altered: ' + hitOR.body.model);
+    if (hitOR.headers['authorization'] !== 'Bearer ork') die('OpenRouter key missing');
+    done(true);
+  })().catch(e => { console.error(e); done(false); });
+}));
+NODE
+
 echo "ok"

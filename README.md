@@ -217,10 +217,30 @@ deep-claude --base-url https://api.deepseek.com/anthropic --api-key-env DEEPSEEK
   --model deepseek-v4-pro -p "hello"
 ```
 
-Personal endpoints talk to the provider **directly** (no proxy, no model picker, no thinking-strip).
+The third argument names the **environment variable** holding the key; deep-claude resolves it from
+your shell, `.env`, or Keychain (`security add-generic-password -s deep-claude -a <name> -U -w`).
+
+### Direct routing inside OpenRouter mode (faster providers)
+
+Here's the useful part: a saved endpoint **also becomes a per-model direct route** in the default
+OpenRouter flow. The endpoint *name* is matched against a model's provider prefix — so once you've
+added a `deepseek` endpoint, any **`deepseek/*`** model you select routes straight to your DeepSeek
+API (with your key), while every other model still goes through OpenRouter. Same session, mixed
+routing, chosen per model:
+
+```bash
+deep-claude endpoints add deepseek https://api.deepseek.com/anthropic DEEPSEEK_API_KEY
+deep-claude --model deepseek      # deepseek/* → your DeepSeek API (fast)
+deep-claude --model gemini        # google/*   → OpenRouter
+```
+
+Why bother? Benchmarked on the same model, **DeepSeek-direct ran ~2× faster than `deepseek/*` via
+OpenRouter** (≈87 vs ≈44 tok/s, half the time-to-first-token). So you get OpenRouter's breadth for
+everything, and your own credentials' speed for the providers you have keys for. The proxy strips the
+provider prefix for the direct call (`deepseek/deepseek-v4-pro` → `deepseek-v4-pro`).
+
 A note on DeepSeek specifically: routing it *through* OpenRouter doesn't improve privacy — OpenRouter
-becomes an additional party. Use a personal endpoint when you want the fewest hops or a provider
-OpenRouter doesn't carry.
+becomes an additional party. A personal endpoint gives you the fewest hops *and* the speed.
 
 ## How it works
 

@@ -237,6 +237,12 @@ endpoints_add() {
   kept+=("$name|$url|$keyenv")
   env_set DEEP_ENDPOINTS "$(join_csv ${kept[@]+"${kept[@]}"})"
   echo "Saved endpoint '$name'."
+  echo "  · use it directly:   deep-claude --endpoint $name --model <id>"
+  echo "  · and in OpenRouter mode, '$name/*' models now route through this"
+  echo "    endpoint (your key) instead of OpenRouter — often faster."
+  if [[ -n "$keyenv" ]]; then
+    echo "  · key comes from \$$keyenv (shell, .env, or Keychain -s deep-claude -a $name)."
+  fi
   endpoints_list
 }
 
@@ -313,6 +319,28 @@ run_setup() {
 
 # Resolve a raw model token (alias name, full id, or empty) into an OpenRouter
 # model id, consulting ROUTER_ALIASES and ROUTER_DEFAULT_MODEL.
+# Resolve each personal-endpoint's key (env, .env, or Keychain service
+# "deep-claude" account=<endpoint name>) and export it, so the proxy can route
+# that provider's models directly with your own credentials.
+export_endpoint_keys() {
+  local cur p name keyenv val
+  cur="$(env_get DEEP_ENDPOINTS)"
+  [[ -z "$cur" ]] && return 0
+  IFS=',' read -ra arr <<<"$cur"
+  for p in ${arr[@]+"${arr[@]}"}; do
+    [[ -z "$p" ]] && continue
+    name="${p%%|*}"
+    keyenv="${p##*|}"
+    [[ -z "$keyenv" || "$keyenv" == "$p" ]] && continue
+    val="${!keyenv:-}"
+    [[ -z "$val" ]] && val="$(env_get "$keyenv")"
+    if [[ -z "$val" ]] && command -v security >/dev/null 2>&1; then
+      val="$(security find-generic-password -s deep-claude -a "$name" -w 2>/dev/null || true)"
+    fi
+    [[ -n "$val" ]] && export "$keyenv=$val"
+  done
+}
+
 resolve_router_model() {
   local m="$1" aliases p
   [[ -z "$m" ]] && m="$(env_get ROUTER_DEFAULT_MODEL)"
@@ -419,6 +447,7 @@ run_openrouter() {
   local port; port="$(find_free_port)"
 
   mkdir -p "$STATE_DIR"
+  export_endpoint_keys   # so the proxy can route <provider>/* models directly
   ROUTER_PORT="$port" ROUTER_HOST="$host" OPENROUTER_API_KEY="$key" \
     node "$SCRIPT_DIR/deep-claude-proxy" >"$STATE_DIR/proxy.log" 2>&1 &
   local pid=$!

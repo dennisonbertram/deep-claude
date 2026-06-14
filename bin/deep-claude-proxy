@@ -23,6 +23,8 @@
 //   ROUTER_HOST          listen host (default 127.0.0.1).
 //   ROUTER_STRICT        "1" => reject models not in the allow-list.
 //   OPENROUTER_BASE_URL  upstream API root (default https://openrouter.ai/api).
+//   DEEP_ENDPOINTS       name|url|KEYENV,...  — models prefixed "<name>/" route
+//                          DIRECT to that endpoint (your key) instead of OpenRouter.
 //   ROUTER_KEEP_THINKING "1" => don't strip thinking blocks for non-Claude models.
 //   ROUTER_REFERER       optional HTTP-Referer for OpenRouter rankings.
 //   ROUTER_TITLE         optional X-Title for OpenRouter rankings.
@@ -58,6 +60,25 @@ for (const pair of (process.env.ROUTER_ALIASES || '').split(',')) {
 
 // The curated set the client may target = explicit models + every alias target.
 const ALLOWED = new Set([...MODELS, ...Object.values(ALIASES)]);
+
+// Personal endpoints double as per-model DIRECT routes: a model whose provider
+// prefix matches an endpoint name (e.g. "deepseek/..." -> the "deepseek"
+// endpoint) is sent straight to that provider's API with your own key, instead
+// of through OpenRouter. The prefix is stripped for the direct call
+// (deepseek/deepseek-v4-pro -> deepseek-v4-pro). DEEP_ENDPOINTS: name|url|KEYENV.
+const DIRECT = {};
+for (const entry of (process.env.DEEP_ENDPOINTS || '').split(',')) {
+  const t = entry.trim();
+  if (!t) continue;
+  const i1 = t.indexOf('|');
+  if (i1 < 0) continue;
+  const name = t.slice(0, i1);
+  const rest = t.slice(i1 + 1);
+  const i2 = rest.indexOf('|');
+  const url = i2 < 0 ? rest : rest.slice(0, i2);
+  const keyenv = i2 < 0 ? '' : rest.slice(i2 + 1);
+  if (name && url) DIRECT[name] = { url: url.replace(/\/+$/, ''), keyenv };
+}
 
 function log(...args) {
   if (DEBUG) console.error('[deep-claude]', ...args);
@@ -235,22 +256,40 @@ async function forward(req, res, path, raw) {
     );
   }
 
-  const outBody = Buffer.from(JSON.stringify(parsed), 'utf8');
-  const headers = {
-    'content-type': 'application/json',
-    authorization: `Bearer ${API_KEY}`,
-    'anthropic-version': req.headers['anthropic-version'] || '2023-06-01',
-  };
+  // Choose the upstream: a matching personal endpoint (direct, your key) or
+  // OpenRouter (default). For direct routes, strip the provider prefix and
+  // authenticate with that endpoint's key.
   const beta = sanitizeBeta(req.headers['anthropic-beta']);
-  if (beta) headers['anthropic-beta'] = beta;
-  if (process.env.ROUTER_REFERER) headers['http-referer'] = process.env.ROUTER_REFERER;
-  if (process.env.ROUTER_TITLE) headers['x-title'] = process.env.ROUTER_TITLE;
+  const anthropicVersion = req.headers['anthropic-version'] || '2023-06-01';
+  const pfx = parsed.model && parsed.model.includes('/') ? parsed.model.split('/')[0] : null;
+  const direct = pfx && DIRECT[pfx] ? DIRECT[pfx] : null;
 
-  log(req.method, path, '->', parsed.model, parsed.stream ? '(stream)' : '');
+  let upstreamUrl;
+  const headers = { 'content-type': 'application/json', 'anthropic-version': anthropicVersion };
+  if (beta) headers['anthropic-beta'] = beta;
+
+  if (direct) {
+    const dkey = (direct.keyenv && process.env[direct.keyenv]) || '';
+    if (!dkey && path !== '/v1/messages/count_tokens') {
+      return anthropicError(res, 401, 'authentication_error',
+        `no key for direct endpoint "${pfx}" (expected env ${direct.keyenv || '?'})`);
+    }
+    parsed.model = parsed.model.slice(pfx.length + 1); // strip provider prefix
+    upstreamUrl = `${direct.url}${path}`;
+    headers['x-api-key'] = dkey;
+  } else {
+    upstreamUrl = `${UPSTREAM}${path}`;
+    headers.authorization = `Bearer ${API_KEY}`;
+    if (process.env.ROUTER_REFERER) headers['http-referer'] = process.env.ROUTER_REFERER;
+    if (process.env.ROUTER_TITLE) headers['x-title'] = process.env.ROUTER_TITLE;
+  }
+
+  const outBody = Buffer.from(JSON.stringify(parsed), 'utf8');
+  log(req.method, path, '->', parsed.model, direct ? `(direct: ${pfx})` : '', parsed.stream ? '(stream)' : '');
 
   let upstream;
   try {
-    upstream = await fetch(`${UPSTREAM}${path}`, { method: 'POST', headers, body: outBody });
+    upstream = await fetch(upstreamUrl, { method: 'POST', headers, body: outBody });
   } catch (err) {
     // count_tokens has no real upstream guarantee — fall back to an estimate.
     if (path === '/v1/messages/count_tokens') {
@@ -265,7 +304,9 @@ async function forward(req, res, path, raw) {
   }
 
   const ct = upstream.headers.get('content-type') || '';
-  const strip = path === '/v1/messages' && shouldStripThinking(parsed.model);
+  // Only OpenRouter needs the redacted_thinking fixup (its Anthropic skin emits
+  // them out of order); direct providers return clean Anthropic streams.
+  const strip = path === '/v1/messages' && !direct && shouldStripThinking(parsed.model);
 
   // Fast path: genuine Claude models (or stripping disabled) pass straight through.
   if (!strip) {
