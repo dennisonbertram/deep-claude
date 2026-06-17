@@ -5,8 +5,10 @@ set -euo pipefail
 #
 #   deep-claude                         run on your default OpenRouter model
 #   deep-claude --model gemini [args]   pick a model for this run (alias or id)
-#   deep-claude pick                    interactive OpenRouter model picker
+#   deep-claude pick                    tabbed picker: OpenRouter + endpoints, ＋ add new
 #   deep-claude models <add|remove|list|default>   curate the OpenRouter set
+#   deep-claude endpoints add                      add a custom endpoint interactively (name + URL + key + models)
+#   deep-claude endpoints pick <name>              browse that endpoint's /v1/models in the picker
 #   deep-claude endpoints <add|remove|list>        manage personal endpoints
 #   deep-claude --endpoint deepseek --model deepseek-v4-pro   use a saved endpoint
 #   deep-claude --base-url URL [--api-key-env VAR] --model M  ad-hoc endpoint
@@ -32,10 +34,11 @@ usage() {
 Usage:
   deep-claude [--model ALIAS|ID] [claude args...]      run on OpenRouter (default)
   deep-claude cli                                      first-run setup wizard (key + models)
-  deep-claude pick                                     pick OpenRouter models (TUI)
+  deep-claude pick                                     tabbed picker: OpenRouter + endpoints + ＋add (TUI)
   deep-claude models <add|remove|list|default> ...     curate the OpenRouter set
   deep-claude endpoints <add|remove|list> ...          manage personal endpoints
-  deep-claude --endpoint NAME --model M [args...]      use a saved endpoint
+  deep-claude endpoints pick NAME                      browse an endpoint's models (TUI)
+  deep-claude --endpoint NAME [--model M] [args...]    use a saved endpoint
   deep-claude --base-url URL [--api-key-env VAR] [--api-key KEY] --model M [args...]
 
 OpenRouter is the default. Set it up once:
@@ -44,6 +47,7 @@ OpenRouter is the default. Set it up once:
   deep-claude                                                        # go
 
 Personal endpoints (DeepSeek-direct, local models, self-hosted) are second-tier:
+  deep-claude endpoints add                                          # interactive: name + URL + key + models
   deep-claude endpoints add deepseek https://api.deepseek.com/anthropic DEEPSEEK_API_KEY
   deep-claude --endpoint deepseek --model deepseek-v4-pro
 
@@ -75,8 +79,13 @@ env_get() {
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ "$line" == "$key="* ]] && val="${line#"$key"=}"
   done <"$ENV_FILE"
-  val="${val%\"}"
-  val="${val#\"}"
+  # Strip ALL surrounding quotes, not just one. env_set wraps in a single pair,
+  # but a value that picked up stray quotes from an earlier bug would otherwise
+  # keep them forever (read strips one, write adds one back). Stripping every
+  # surrounding quote lets such values self-heal on the next write. Our values
+  # (model ids, aliases, URLs) never legitimately contain a double quote.
+  while [[ "$val" == '"'* ]]; do val="${val#\"}"; done
+  while [[ "$val" == *'"' ]]; do val="${val%\"}"; done
   printf '%s' "$val"
 }
 
@@ -107,6 +116,17 @@ join_csv() {
   done
   printf '%s' "$out"
 }
+
+# Uppercase, env-var-safe slug of an endpoint name (e.g. "deepseek-custom" ->
+# "DEEPSEEK_CUSTOM"). Used to build per-endpoint env-var names.
+ep_slug() {
+  printf '%s' "$1" | LC_ALL=C tr 'a-z' 'A-Z' | LC_ALL=C tr -c 'A-Z0-9' '_'
+}
+
+# Derive a stable env-var name for an endpoint's key from its name, e.g.
+# "deepseek" -> "DEEP_KEY_DEEPSEEK". Used by the interactive endpoint flow so
+# the user never has to invent a variable name.
+keyenv_for() { printf 'DEEP_KEY_%s' "$(ep_slug "$1")"; }
 
 # --- OpenRouter model curation ----------------------------------------------
 models_list() {
@@ -218,9 +238,14 @@ endpoints_list() {
   IFS=',' read -ra arr <<<"$cur"
   for p in ${arr[@]+"${arr[@]}"}; do
     [[ -z "$p" ]] && continue
-    local name="${p%%|*}" rest="${p#*|}" url="${p#*|}" keyenv
+    local name="${p%%|*}" rest="${p#*|}" url="${p#*|}" keyenv models default slug
     url="${rest%%|*}"; keyenv="${rest#*|}"
     printf '  %-12s %s%s\n' "$name" "$url" "${keyenv:+   (key: \$$keyenv)}"
+    slug="$(ep_slug "$name")"
+    models="$(env_get "DEEP_EP_MODELS_$slug")"; default="$(env_get "DEEP_EP_DEFAULT_$slug")"
+    if [[ -n "$models" ]]; then
+      printf '  %-12s models: %s%s\n' "" "${models//,/, }" "${default:+   (default: $default)}"
+    fi
   done
 }
 
@@ -237,7 +262,13 @@ endpoints_add() {
   kept+=("$name|$url|$keyenv")
   env_set DEEP_ENDPOINTS "$(join_csv ${kept[@]+"${kept[@]}"})"
   echo "Saved endpoint '$name'."
-  echo "  · use it directly:   deep-claude --endpoint $name --model <id>"
+  local ep_default; ep_default="$(env_get "DEEP_EP_DEFAULT_$(ep_slug "$name")")"
+  if [[ -n "$ep_default" ]]; then
+    echo "  · use it directly:   deep-claude --endpoint $name            # default: $ep_default"
+    echo "    switch models in-session with /model, or per run with --model <id>"
+  else
+    echo "  · use it directly:   deep-claude --endpoint $name --model <id>"
+  fi
   echo "  · and in OpenRouter mode, '$name/*' models now route through this"
   echo "    endpoint (your key) instead of OpenRouter — often faster."
   if [[ -n "$keyenv" ]]; then
@@ -256,6 +287,73 @@ endpoints_add() {
     fi
   fi
   endpoints_list
+}
+
+# Interactive `endpoints add`: prompt for a name, base URL, and (optionally) an
+# API key, then store the key in Keychain (preferred) or .env and save the
+# endpoint. Lets you add a custom endpoint without knowing the positional-arg
+# syntax or the env-var indirection.
+endpoints_add_interactive() {
+  [[ -t 0 ]] || { echo "deep-claude: 'endpoints add' needs a terminal for interactive mode (or pass: add <name> <url> [KEY_ENV_VAR])" >&2; exit 2; }
+  printf '\n  \033[1mAdd a custom endpoint\033[0m (any Anthropic-compatible URL)\n\n'
+  local name url key keyenv
+  printf '  Name (e.g. deepseek): '; read -r name
+  [[ -z "$name" ]] && { echo "deep-claude: name is required" >&2; exit 2; }
+  case "$name" in
+    *[,\|\ ]*) echo "deep-claude: name must not contain spaces, ',' or '|'" >&2; exit 2 ;;
+  esac
+  printf '  Base URL (e.g. https://api.deepseek.com/anthropic): '; read -r url
+  [[ -z "$url" ]] && { echo "deep-claude: base URL is required" >&2; exit 2; }
+  case "$url" in
+    *[,\|]*) echo "deep-claude: URL must not contain ',' or '|'" >&2; exit 2 ;;
+  esac
+  printf '  API key (hidden — leave blank for keyless endpoints like local Ollama): '
+  read -rs key; printf '\n'
+
+  keyenv=""
+  if [[ -n "$key" ]]; then
+    keyenv="$(keyenv_for "$name")"
+    if command -v security >/dev/null 2>&1 \
+      && security add-generic-password -s deep-claude -a "$name" -U -w "$key" >/dev/null 2>&1; then
+      printf '  · key stored in Keychain (service deep-claude, account %s)\n' "$name"
+    else
+      env_set "$keyenv" "$key"
+      printf '  · key stored in %s\n' "$ENV_FILE"
+    fi
+  fi
+
+  # Models: browse the endpoint's own catalog (same picker as OpenRouter), or
+  # type ids by hand. Either way you can switch between them in-session (/model)
+  # and launch without typing --model.
+  local slug; slug="$(ep_slug "$name")"
+  if command -v node >/dev/null 2>&1; then
+    local browse
+    printf '  Browse this endpoint'\''s models now? [Y/n]: '; read -r browse
+    if [[ -z "$browse" || "$browse" == [Yy]* ]]; then
+      DEEP_PICK_MODE=endpoint DEEP_PICK_ENDPOINT_NAME="$name" DEEP_PICK_BASE_URL="$url" \
+        DEEP_PICK_API_KEY="$key" DEEP_CLAUDE_ENV_FILE="$ENV_FILE" node "$SCRIPT_DIR/deep-claude-pick" || true
+      load_env
+    fi
+  fi
+  # Fall back to manual entry if nothing got saved (declined, no node, or the
+  # endpoint exposes no /models API).
+  if [[ -z "$(env_get "DEEP_EP_MODELS_$slug")" ]]; then
+    local models first default
+    printf '  Model ids — comma-separated, optional (e.g. deepseek-chat,deepseek-reasoner): '
+    read -r models; models="${models//[[:space:]]/}"
+    if [[ -n "$models" ]]; then
+      case "$models" in *\|*) echo "deep-claude: model ids must not contain '|'" >&2; exit 2 ;; esac
+      env_set "DEEP_EP_MODELS_$slug" "$models"
+      first="${models%%,*}"
+      printf '  Default model [%s]: ' "$first"; read -r default
+      default="${default//[[:space:]]/}"; [[ -z "$default" ]] && default="$first"
+      env_set "DEEP_EP_DEFAULT_$slug" "$default"
+      printf '  · %s model(s) saved; default: %s\n' "$(printf '%s' "$models" | tr ',' '\n' | grep -c .)" "$default"
+    fi
+  fi
+
+  printf '\n'
+  endpoints_add "$name" "$url" "$keyenv"
 }
 
 endpoints_remove() {
@@ -277,7 +375,10 @@ endpoints_dispatch() {
   [[ $# -gt 0 ]] && shift || true
   case "$sub" in
     list) endpoints_list ;;
-    add) endpoints_add "${1:-}" "${2:-}" "${3:-}" ;;
+    add)
+      if [[ $# -eq 0 ]]; then endpoints_add_interactive
+      else endpoints_add "${1:-}" "${2:-}" "${3:-}"; fi ;;
+    pick | models) run_endpoint_pick "${1:-}" ;;
     remove | rm) endpoints_remove "${1:-}" ;;
     *) echo "deep-claude: unknown 'endpoints' subcommand: $sub" >&2; usage; exit 2 ;;
   esac
@@ -295,9 +396,39 @@ resolve_openrouter_key() {
 
 run_pick() {
   command -v node >/dev/null 2>&1 || { echo "deep-claude: node is required for the picker" >&2; exit 1; }
+  # The hub is a tabbed picker over OpenRouter + every saved endpoint, with an
+  # inline "＋ Add" tab. An OpenRouter key is optional (that tab just shows a
+  # notice when absent), so you can manage endpoints here without one.
   local key; key="$(resolve_openrouter_key)"
-  [[ -z "$key" ]] && { echo "deep-claude: missing OPENROUTER_API_KEY (env, .env, or Keychain -s deep-router -a openrouter)" >&2; exit 1; }
-  OPENROUTER_API_KEY="$key" DEEP_CLAUDE_ENV_FILE="$ENV_FILE" exec node "$SCRIPT_DIR/deep-claude-pick"
+  export_endpoint_keys   # so the hub can list each endpoint's models with your key
+  OPENROUTER_API_KEY="$key" DEEP_PICK_MODE=hub DEEP_CLAUDE_ENV_FILE="$ENV_FILE" exec node "$SCRIPT_DIR/deep-claude-pick"
+}
+
+# Resolve a personal endpoint's key from its key-env var (shell, .env) or
+# Keychain (service deep-claude, account=<name>). Prints the key (or empty).
+resolve_endpoint_key() {
+  local name="$1" keyenv="$2" key=""
+  if [[ -n "$keyenv" ]]; then
+    key="${!keyenv:-}"
+    [[ -z "$key" ]] && key="$(env_get "$keyenv")"
+  fi
+  if [[ -z "$key" ]] && command -v security >/dev/null 2>&1; then
+    key="$(security find-generic-password -s deep-claude -a "$name" -w 2>/dev/null || true)"
+  fi
+  printf '%s' "$key"
+}
+
+# Browse a saved endpoint's own /v1/models in the picker TUI and save the
+# selection (DEEP_EP_MODELS_<slug> / DEEP_EP_DEFAULT_<slug>).
+run_endpoint_pick() {
+  local name="$1"
+  [[ -z "$name" ]] && { echo "deep-claude: 'endpoints pick' needs an endpoint name (see: deep-claude endpoints list)" >&2; exit 2; }
+  command -v node >/dev/null 2>&1 || { echo "deep-claude: node is required for the picker" >&2; exit 1; }
+  local spec; spec="$(endpoint_lookup "$name")" || { echo "deep-claude: no saved endpoint '$name' (see: deep-claude endpoints list)" >&2; exit 1; }
+  local url="${spec%%|*}" keyenv="${spec#*|}" key
+  key="$(resolve_endpoint_key "$name" "$keyenv")"
+  DEEP_PICK_MODE=endpoint DEEP_PICK_ENDPOINT_NAME="$name" DEEP_PICK_BASE_URL="$url" \
+    DEEP_PICK_API_KEY="$key" DEEP_CLAUDE_ENV_FILE="$ENV_FILE" node "$SCRIPT_DIR/deep-claude-pick"
 }
 
 # Ensure a key and a curated model set exist, running the key wizard and/or the
@@ -309,23 +440,22 @@ run_setup() {
   local interactive=""
   [[ "${1:-}" == "interactive" ]] && interactive=1
 
+  # The hub picker is the whole setup now: it manages the OpenRouter key (press
+  # `e` on the OpenRouter provider) and every personal endpoint (＋ Add provider)
+  # in one place, then lets you drill into each provider's model list. So both
+  # `deep-claude cli` and the first-run auto-setup just hand straight off to it.
   local key; key="$(resolve_openrouter_key)"
-  # Run the key step when interactive (so `deep-claude cli` can keep/replace the
-  # key) or when no key exists yet. Pass the current key so the wizard can offer
-  # to keep it instead of forcing a re-entry.
-  if [[ -n "$interactive" || -z "$key" ]]; then
-    OPENROUTER_API_KEY="$key" DEEP_CLAUDE_ENV_FILE="$ENV_FILE" node "$SCRIPT_DIR/deep-claude-cli" || return 1
-    load_env
-    key="$(resolve_openrouter_key)"
+  export_endpoint_keys
+  OPENROUTER_API_KEY="$key" DEEP_PICK_MODE=hub DEEP_PICK_QUIET=1 DEEP_CLAUDE_ENV_FILE="$ENV_FILE" node "$SCRIPT_DIR/deep-claude-pick" || true
+  load_env
+  key="$(resolve_openrouter_key)"
+
+  if [[ -n "$interactive" ]]; then
+    printf '\n  \033[32m✓\033[0m Setup complete. Run: \033[1mdeep-claude\033[0m\n\n'
+    return 0
   fi
+  # First-run auto-setup: only proceed to launch if a key actually got set.
   [[ -z "$key" ]] && return 1
-
-  if [[ -n "$interactive" || -z "$(env_get ROUTER_MODELS)" ]]; then
-    OPENROUTER_API_KEY="$key" DEEP_CLAUDE_ENV_FILE="$ENV_FILE" node "$SCRIPT_DIR/deep-claude-pick" || true
-    load_env
-  fi
-
-  [[ -n "$interactive" ]] && printf '\n  \033[32m✓\033[0m Setup complete. Run: \033[1mdeep-claude\033[0m\n\n'
   return 0
 }
 
@@ -349,8 +479,12 @@ export_endpoint_keys() {
     if [[ -z "$val" ]] && command -v security >/dev/null 2>&1; then
       val="$(security find-generic-password -s deep-claude -a "$name" -w 2>/dev/null || true)"
     fi
-    [[ -n "$val" ]] && export "$keyenv=$val"
+    # Use if/fi, not `[[ ]] && export`: as the loop's last statement the latter
+    # returns 1 when an endpoint has no key, which under `set -e` would abort the
+    # whole wrapper (e.g. `deep-claude cli` exiting before the picker appears).
+    if [[ -n "$val" ]]; then export "$keyenv=$val"; fi
   done
+  return 0
 }
 
 resolve_router_model() {
@@ -526,15 +660,61 @@ run_openrouter() {
 
 # --- run: personal endpoint (direct, no proxy) ------------------------------
 run_endpoint() {
-  local url="$1" key="$2" model="$3"; shift 3
+  local url="$1" key="$2" model="$3" name="$4"; shift 4
   local args=("$@")
-  [[ -z "$model" ]] && { echo "deep-claude: a personal endpoint needs --model <id>." >&2; exit 1; }
+
+  # Resolve this endpoint's configured models (interactive `endpoints add`) so
+  # you can launch without --model and switch between them in-session.
+  local models="" default="" slug=""
+  if [[ -n "$name" ]]; then
+    slug="$(ep_slug "$name")"
+    models="$(env_get "DEEP_EP_MODELS_$slug")"
+    default="$(env_get "DEEP_EP_DEFAULT_$slug")"
+  fi
+  [[ -z "$model" ]] && model="$default"
+  [[ -z "$model" && -n "$models" ]] && model="${models%%,*}"
+  if [[ -z "$model" ]]; then
+    if [[ -n "$name" ]]; then
+      echo "deep-claude: endpoint '$name' has no model. Pass --model <id>, or run 'deep-claude endpoints add' to configure models." >&2
+    else
+      echo "deep-claude: a personal endpoint needs --model <id>." >&2
+    fi
+    exit 1
+  fi
 
   set_claude_state
   export ANTHROPIC_BASE_URL="$url"
   export ANTHROPIC_AUTH_TOKEN="${key:-none}"
   export ANTHROPIC_API_KEY="${key:-none}"
   export ANTHROPIC_MODEL="$model"
+
+  # Map the endpoint's models onto Claude Code's /model switch slots so you can
+  # flip between them in-session. Prefer the explicit per-slot assignments set in
+  # the picker (DEEP_EP_SLOT_<TIER>_<slug>); if none were set, fall back to list
+  # order (opus/sonnet/haiku/fable). Any unfilled slot falls back to the launch
+  # model. (ANTHROPIC_SMALL_FAST_MODEL is the deprecated alias of HAIKU; we still
+  # set it so older Claude Code builds keep working.)
+  if [[ -n "$models" ]]; then
+    local ms sl_o sl_s sl_h sl_f
+    IFS=',' read -ra ms <<<"$models"
+    if [[ -n "$slug" ]]; then
+      sl_o="$(env_get "DEEP_EP_SLOT_OPUS_$slug")"; sl_s="$(env_get "DEEP_EP_SLOT_SONNET_$slug")"
+      sl_h="$(env_get "DEEP_EP_SLOT_HAIKU_$slug")"; sl_f="$(env_get "DEEP_EP_SLOT_FABLE_$slug")"
+    fi
+    if [[ -n "$sl_o$sl_s$sl_h$sl_f" ]]; then
+      export ANTHROPIC_DEFAULT_OPUS_MODEL="${sl_o:-$model}"
+      export ANTHROPIC_DEFAULT_SONNET_MODEL="${sl_s:-$model}"
+      export ANTHROPIC_DEFAULT_HAIKU_MODEL="${sl_h:-$model}"
+      export ANTHROPIC_DEFAULT_FABLE_MODEL="${sl_f:-$model}"
+      export ANTHROPIC_SMALL_FAST_MODEL="${sl_h:-$model}"
+    else
+      export ANTHROPIC_DEFAULT_OPUS_MODEL="${ms[0]:-$model}"
+      export ANTHROPIC_DEFAULT_SONNET_MODEL="${ms[1]:-$model}"
+      export ANTHROPIC_DEFAULT_HAIKU_MODEL="${ms[2]:-$model}"
+      export ANTHROPIC_DEFAULT_FABLE_MODEL="${ms[3]:-$model}"
+      export ANTHROPIC_SMALL_FAST_MODEL="${ms[2]:-$model}"
+    fi
+  fi
 
   if ((${#args[@]})); then exec "${CLAUDE_BIN:-claude}" --model "$model" "${args[@]}"; else exec "${CLAUDE_BIN:-claude}" --model "$model"; fi
 }
@@ -575,7 +755,7 @@ run_main() {
       key="${!api_key_env:-}"
       [[ -z "$key" ]] && key="$(env_get "$api_key_env")"
     fi
-    run_endpoint "$base_url" "$key" "$model" ${args[@]+"${args[@]}"}
+    run_endpoint "$base_url" "$key" "$model" "$endpoint" ${args[@]+"${args[@]}"}
   else
     run_openrouter "$model" ${args[@]+"${args[@]}"}
   fi

@@ -2,12 +2,19 @@
 'use strict';
 
 // deep-claude-pick — a full-screen interactive picker for choosing which
-// OpenRouter models to expose. No dependencies.
+// models to expose. No dependencies. Two modes, same UI:
 //
-// Env (set by the `deep-claude pick` wrapper):
-//   OPENROUTER_API_KEY    required — used to fetch the model catalog.
-//   DEEP_CLAUDE_ENV_FILE  the .env file to write ROUTER_* into.
-//   OPENROUTER_BASE_URL   optional upstream root (default https://openrouter.ai/api).
+//   OpenRouter mode (default) — browse OpenRouter's catalog, write ROUTER_*.
+//     OPENROUTER_API_KEY    required — used to fetch the model catalog.
+//     OPENROUTER_BASE_URL   optional upstream root (default https://openrouter.ai/api).
+//     DEEP_CLAUDE_ENV_FILE  the .env file to write ROUTER_* into.
+//
+//   Endpoint mode (DEEP_PICK_MODE=endpoint) — browse a personal endpoint's own
+//   /v1/models, write DEEP_EP_MODELS_<slug> / DEEP_EP_DEFAULT_<slug>.
+//     DEEP_PICK_ENDPOINT_NAME   the saved endpoint's name (for the env-var slug).
+//     DEEP_PICK_BASE_URL        the endpoint's Anthropic-compatible base URL.
+//     DEEP_PICK_API_KEY         the endpoint's key (may be empty for keyless).
+//     DEEP_CLAUDE_ENV_FILE      the .env file to write into.
 //
 // Stages: (1) multi-select models with live search, (2) pick the default.
 // Aliases are auto-derived from each model id (editable later via
@@ -15,6 +22,7 @@
 // / ROUTER_DEFAULT_MODEL.
 
 const fs = require('fs');
+const { spawnSync } = require('child_process');
 
 const API_KEY = process.env.OPENROUTER_API_KEY || '';
 const ENV_FILE = process.env.DEEP_CLAUDE_ENV_FILE || '.env';
@@ -80,6 +88,50 @@ function teardown() {
   process.stdin.pause();
 }
 
+// Decode raw TTY bytes into discrete key tokens, tolerant of escape sequences
+// that arrive split across reads — common over SSH, slow ptys, and some
+// terminal emulators. A lone trailing ESC is held briefly; only if nothing
+// follows within a short window is it emitted as a real Escape. Without this, a
+// split arrow key ("\x1b" in one read, then "[A") looks like a bare Escape and
+// quits the picker — the classic "I pressed a key and it just exited" bug.
+// onToken(k) is called per key; return 'stop' from it to detach the reader.
+// Returns a detach function.
+function keyReader(onToken) {
+  let carry = '';
+  let timer = null;
+  let stopped = false;
+  const clearTimer = () => { if (timer) { clearTimeout(timer); timer = null; } };
+  function detach() { stopped = true; clearTimer(); process.stdin.removeListener('data', onData); }
+  const emit = (k) => { if (onToken(k) === 'stop') detach(); return stopped; };
+  const flush = (final) => {
+    const s = carry; carry = '';
+    let i = 0;
+    while (i < s.length) {
+      if (s[i] === '\x1b') {
+        if (s[i + 1] === '[') {
+          if (i + 2 < s.length) { if (emit(s.slice(i, i + 3))) return; i += 3; continue; }
+          if (final) { if (emit('\x1b')) return; i += 1; continue; }   // give up waiting
+          carry = s.slice(i); return;                                   // hold partial CSI
+        }
+        if (i + 1 < s.length) { if (emit('\x1b')) return; i += 1; continue; } // ESC + another char
+        if (final) { if (emit('\x1b')) return; i += 1; continue; }      // lone ESC, settled
+        carry = s.slice(i); return;                                     // hold lone ESC
+      }
+      if (emit(s[i])) return;
+      i += 1;
+    }
+  };
+  const onData = (buf) => {
+    if (stopped) return;
+    clearTimer();
+    carry += buf.toString();
+    flush(false);
+    if (!stopped && carry) timer = setTimeout(() => { timer = null; if (!stopped) flush(true); }, 40);
+  };
+  process.stdin.on('data', onData);
+  return detach;
+}
+
 // Generic interactive list. opts: { title, rows:[{id,cells}], multi, footer }
 // Returns a Promise resolving to an array of selected ids (or null if cancelled).
 function runList({ title, rows, multi, preselect }) {
@@ -133,40 +185,25 @@ function runList({ title, rows, multi, preselect }) {
       out.write(s);
     };
 
-    // A single data chunk may carry several keystrokes (fast typing, paste, or
-    // a terminal multiplexer batching input). Walk the buffer key by key,
-    // recognizing CSI escape sequences for the arrows.
-    const onKey = (buf) => {
+    // keyReader hands us one fully-formed key at a time (escape sequences are
+    // reassembled even when split across reads), so we just act on each.
+    const done = (val) => { resolve(val); return 'stop'; };
+    const onToken = (k) => {
       if (Date.now() - openedAt < 150) return; // swallow leaked/buffered keystrokes
-      const s = buf.toString();
-      let i = 0;
-      let dirty = false;
-      while (i < s.length) {
-        let k;
-        if (s[i] === '\x1b' && s[i + 1] === '[') { k = s.slice(i, i + 3); i += 3; }
-        else { k = s[i]; i += 1; }
-        const rowsArr = filtered();
-        if (k === '\x03' || k === '\x1b') { cleanup(); return resolve(null); } // ctrl-c / esc
-        if (k === '\r' || k === '\n') {
-          cleanup();
-          if (multi) return resolve([...selected]);
-          return resolve(rowsArr[cursor] ? [rowsArr[cursor].id] : []);
-        }
-        if (k === '\x1b[A' || k === '\x10') { cursor = Math.max(0, cursor - 1); dirty = true; continue; }
-        if (k === '\x1b[B' || k === '\x0e') { cursor = Math.min(rowsArr.length - 1, cursor + 1); dirty = true; continue; }
-        if (k === ' ' && multi) {
-          const r = rowsArr[cursor];
-          if (r) { selected.has(r.id) ? selected.delete(r.id) : selected.add(r.id); cursor = Math.min(rowsArr.length - 1, cursor + 1); }
-          dirty = true; continue;
-        }
-        if (k === '\x7f' || k === '\b') { query = query.slice(0, -1); cursor = 0; top = 0; dirty = true; continue; }
-        if (k.length === 1 && k >= ' ' && k <= '~') { query += k; cursor = 0; top = 0; dirty = true; continue; }
+      const rowsArr = filtered();
+      if (k === '\x03' || k === '\x1b') return done(null);                    // ctrl-c / esc
+      if (k === '\r' || k === '\n') return done(multi ? [...selected] : (rowsArr[cursor] ? [rowsArr[cursor].id] : []));
+      if (k === '\x1b[A' || k === '\x10') { cursor = Math.max(0, cursor - 1); render(); return; }
+      if (k === '\x1b[B' || k === '\x0e') { cursor = Math.min(rowsArr.length - 1, cursor + 1); render(); return; }
+      if (k === ' ' && multi) {
+        const r = rowsArr[cursor];
+        if (r) { selected.has(r.id) ? selected.delete(r.id) : selected.add(r.id); cursor = Math.min(rowsArr.length - 1, cursor + 1); }
+        render(); return;
       }
-      if (dirty) render();
+      if (k === '\x7f' || k === '\b') { query = query.slice(0, -1); cursor = 0; top = 0; render(); return; }
+      if (k.length === 1 && k >= ' ' && k <= '~') { query += k; cursor = 0; top = 0; render(); return; }
     };
-
-    const cleanup = () => process.stdin.removeListener('data', onKey);
-    process.stdin.on('data', onKey);
+    keyReader(onToken);
     render();
   });
 }
@@ -211,37 +248,28 @@ function assignSlots(chosenRows) {
       s += `\n${C.gray}  ↑/↓ slot · ←/→ change model · ↵ save · esc cancel${C.reset}`;
       out.write(s);
     };
-    const onKey = (buf) => {
+    const onToken = (k) => {
       if (Date.now() - openedAt < 150) return;
-      const str = buf.toString();
-      let i = 0, dirty = false;
-      while (i < str.length) {
-        let k;
-        if (str[i] === '\x1b' && str[i + 1] === '[') { k = str.slice(i, i + 3); i += 3; }
-        else { k = str[i]; i += 1; }
-        if (k === '\x03' || k === '\x1b') { process.stdin.removeListener('data', onKey); return resolve(null); }
-        if (k === '\r' || k === '\n') {
-          process.stdin.removeListener('data', onKey);
-          const r = {};
-          for (const s of SLOTS) r[s.key] = optsFor(s)[idx[s.key]];
-          return resolve(r);
-        }
-        if (k === '\x1b[A') { cursor = (cursor - 1 + SLOTS.length) % SLOTS.length; dirty = true; continue; }
-        if (k === '\x1b[B') { cursor = (cursor + 1) % SLOTS.length; dirty = true; continue; }
-        if (k === '\x1b[C' || k === '\x1b[D') {
-          const s2 = SLOTS[cursor]; const opts = optsFor(s2); const dir = k === '\x1b[C' ? 1 : -1;
-          idx[s2.key] = (idx[s2.key] + dir + opts.length) % opts.length; dirty = true; continue;
-        }
+      if (k === '\x03' || k === '\x1b') { resolve(null); return 'stop'; }
+      if (k === '\r' || k === '\n') {
+        const r = {};
+        for (const s of SLOTS) r[s.key] = optsFor(s)[idx[s.key]];
+        resolve(r); return 'stop';
       }
-      if (dirty) render();
+      if (k === '\x1b[A') { cursor = (cursor - 1 + SLOTS.length) % SLOTS.length; render(); return; }
+      if (k === '\x1b[B') { cursor = (cursor + 1) % SLOTS.length; render(); return; }
+      if (k === '\x1b[C' || k === '\x1b[D') {
+        const s2 = SLOTS[cursor]; const opts = optsFor(s2); const dir = k === '\x1b[C' ? 1 : -1;
+        idx[s2.key] = (idx[s2.key] + dir + opts.length) % opts.length; render(); return;
+      }
     };
-    process.stdin.on('data', onKey);
+    keyReader(onToken);
     render();
   });
 }
 
-// ---- main ------------------------------------------------------------------
-async function main() {
+// ---- OpenRouter mode -------------------------------------------------------
+async function pickOpenRouter() {
   if (!API_KEY) fail('OPENROUTER_API_KEY is not set.');
 
   out.write('Fetching OpenRouter models…\r');
@@ -327,4 +355,606 @@ async function main() {
   process.exit(0);
 }
 
-main().catch((e) => { teardown(); fail(e && e.stack ? e.stack : String(e)); });
+// ---- Endpoint mode ---------------------------------------------------------
+// env-var slug for an endpoint name — must match bash ep_slug(): uppercase,
+// every non-[A-Z0-9] char becomes '_'.
+function epSlug(name) {
+  return String(name).toUpperCase().replace(/[^A-Z0-9]/g, '_');
+}
+
+// Fetch a model list from an Anthropic/OpenAI-compatible endpoint. The saved
+// base URL points at the messages API (e.g. .../anthropic), so try a few
+// well-known model-list locations and auth styles and take the first that
+// returns a non-empty list. Returns an array of {id,name} or {error:[...]}.
+async function fetchEndpointModels(base, key) {
+  const root = base.replace(/\/+$/, '');
+  let origin = '';
+  try { origin = new URL(root).origin; } catch {}
+  const bases = [root];
+  if (origin && !bases.includes(origin)) bases.push(origin);
+  const paths = ['/v1/models', '/models'];
+  const headerSets = [];
+  if (key) {
+    headerSets.push({ authorization: `Bearer ${key}` });
+    headerSets.push({ 'x-api-key': key, 'anthropic-version': '2023-06-01' });
+  } else {
+    headerSets.push({});
+  }
+  const tried = [];
+  for (const b of bases) {
+    for (const p of paths) {
+      const url = b + p;
+      for (const headers of headerSets) {
+        try {
+          const r = await fetch(url, { headers });
+          if (r.ok) {
+            let j;
+            try { j = await r.json(); } catch { tried.push(`${url} → non-JSON`); continue; }
+            const data = Array.isArray(j) ? j : (j.data || j.models || []);
+            const list = (data || [])
+              .map((m) => (typeof m === 'string' ? { id: m } : m))
+              .filter((m) => m && m.id)
+              .map((m) => ({ id: m.id, name: m.display_name || m.name || m.owned_by || '' }));
+            if (list.length) return list;
+            tried.push(`${url} → empty list`);
+          } else {
+            tried.push(`${url} → HTTP ${r.status}`);
+          }
+        } catch (e) {
+          tried.push(`${url} → ${e.message}`);
+        }
+        break; // one auth style per URL is enough on a non-error; try next URL
+      }
+    }
+  }
+  return { error: tried };
+}
+
+async function pickEndpoint() {
+  const name = process.env.DEEP_PICK_ENDPOINT_NAME || '';
+  const base = process.env.DEEP_PICK_BASE_URL || '';
+  const key = process.env.DEEP_PICK_API_KEY || '';
+  if (!name) fail('DEEP_PICK_ENDPOINT_NAME is not set.');
+  if (!base) fail('DEEP_PICK_BASE_URL is not set.');
+
+  out.write(`Fetching models from ${base}…\r`);
+  const result = await fetchEndpointModels(base, key);
+  if (result && result.error) {
+    fail(
+      `could not list models for '${name}'.\n` +
+      result.error.map((t) => `    ${t}`).join('\n') +
+      `\n  This endpoint may not expose a /models API — set them by hand instead:\n` +
+      `    deep-claude endpoints add   (type a comma-separated list)`
+    );
+  }
+  const models = result;
+  models.sort((a, b) => a.id.localeCompare(b.id));
+
+  const slug = epSlug(name);
+  let preEnv = '';
+  try { if (fs.existsSync(ENV_FILE)) preEnv = fs.readFileSync(ENV_FILE, 'utf8'); } catch {}
+  const preMatch = (preEnv.match(new RegExp(`^DEEP_EP_MODELS_${slug}="?(.*?)"?$`, 'm')) || [])[1] || '';
+  const preselect = preMatch.split(',').map((s) => s.trim()).filter(Boolean);
+  const preDefault = (preEnv.match(new RegExp(`^DEEP_EP_DEFAULT_${slug}="?(.*?)"?$`, 'm')) || [])[1] || '';
+
+  const idW = Math.min(46, Math.max(...models.map((m) => m.id.length)));
+  const rows = models.map((m) => {
+    const nm = (m.name || '').slice(0, 44);
+    const label = `${C.bold}${m.id.padEnd(idW)}${C.reset} ${C.dim}${nm}${C.reset}`;
+    return { id: m.id, label, hay: (m.id + ' ' + nm).toLowerCase() };
+  });
+
+  setup();
+  process.on('exit', teardown);
+
+  const chosen = await runList({
+    title: `Select models for '${name}'  (switch between them in-session with /model)`,
+    rows, multi: true, preselect,
+  });
+  if (chosen === null || chosen.length === 0) { teardown(); out.write('No changes made.\n'); process.exit(0); }
+
+  // Pick the default among the chosen models.
+  const chosenRows = rows.filter((r) => chosen.includes(r.id));
+  const defPick = await runList({
+    title: `Default model for '${name}'`,
+    rows: chosenRows, multi: false,
+    preselect: preDefault && chosen.includes(preDefault) ? [preDefault] : [],
+  });
+  teardown();
+  if (defPick === null) { out.write('No changes made.\n'); process.exit(0); }
+  const defModel = (defPick && defPick[0]) || chosen[0];
+
+  envSet({
+    [`DEEP_EP_MODELS_${slug}`]: chosen.join(','),
+    [`DEEP_EP_DEFAULT_${slug}`]: defModel,
+  });
+
+  out.write(`\n${C.green}✓${C.reset} Saved ${C.bold}${chosen.length}${C.reset} model(s) for ${C.cyan}${name}${C.reset}\n`);
+  out.write(`  ${C.bold}Default${C.reset} ${C.gray}→${C.reset} ${defModel}\n`);
+  out.write(`\n  ${C.gray}Launch with${C.reset} ${C.bold}deep-claude --endpoint ${name}${C.reset}${C.gray}; switch with /model in-session.${C.reset}\n`);
+  process.exit(0);
+}
+
+// ---- Hub mode: tabbed picker over OpenRouter + every personal endpoint ------
+function readEnvFile() {
+  try { return fs.existsSync(ENV_FILE) ? fs.readFileSync(ENV_FILE, 'utf8') : ''; } catch { return ''; }
+}
+function envGetStr(env, key) {
+  const m = env.match(new RegExp(`^${key}=(.*)$`, 'm'));
+  // Strip every surrounding quote, not just one — so a value that picked up
+  // stray quotes from an earlier bug self-heals on the next write (envSet wraps
+  // in exactly one pair). Our values never legitimately contain a double quote.
+  return m ? m[1].replace(/^"+/, '').replace(/"+$/, '') : '';
+}
+function parseEndpoints(env) {
+  const cur = envGetStr(env, 'DEEP_ENDPOINTS');
+  return cur.split(',').map((s) => s.trim()).filter(Boolean).map((p) => {
+    const [name, url, keyenv] = p.split('|');
+    return { name, url: url || '', keyenv: keyenv || '' };
+  });
+}
+function buildOpenRouterRows(models) {
+  models.sort((a, b) => a.id.localeCompare(b.id));
+  const idW = Math.min(46, Math.max(8, ...models.map((m) => m.id.length)));
+  return models.map((m) => {
+    const ctx = ctxShort(m.context_length).padStart(5);
+    const price = `${priceM(m.pricing && m.pricing.prompt)}/${priceM(m.pricing && m.pricing.completion)}`.padEnd(14);
+    const name = (m.name || '').slice(0, 40);
+    const label = `${C.bold}${m.id.padEnd(idW)}${C.reset} ${C.yellow}${ctx}${C.reset} ${C.gray}${price}${C.reset} ${C.dim}${name}${C.reset}`;
+    return { id: m.id, label, hay: (m.id + ' ' + name).toLowerCase() };
+  });
+}
+function buildEndpointRows(models) {
+  models.sort((a, b) => a.id.localeCompare(b.id));
+  const idW = Math.min(46, Math.max(8, ...models.map((m) => m.id.length)));
+  return models.map((m) => {
+    const nm = (m.name || '').slice(0, 44);
+    const label = `${C.bold}${m.id.padEnd(idW)}${C.reset} ${C.dim}${nm}${C.reset}`;
+    return { id: m.id, label, hay: (m.id + ' ' + nm).toLowerCase() };
+  });
+}
+async function fetchOpenRouterModels(key) {
+  const r = await fetch(`${BASE}/v1/models`, { headers: { authorization: `Bearer ${key}` } });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const models = (await r.json()).data;
+  if (!Array.isArray(models) || !models.length) throw new Error('no models returned');
+  return models;
+}
+function uniqueAliases(ids) {
+  const aliases = []; const used = new Set();
+  for (const id of ids) {
+    let a = alias(id), n = a, i = 2;
+    while (used.has(n)) n = `${a}-${i++}`;
+    used.add(n); aliases.push(`${n}=${id}`);
+  }
+  return aliases;
+}
+function storeEndpointKey(name, keyenv, key) {
+  let ok = false;
+  try { ok = spawnSync('security', ['add-generic-password', '-s', 'deep-claude', '-a', name, '-U', '-w', key], { stdio: 'ignore' }).status === 0; } catch {}
+  if (!ok) envSet({ [keyenv]: key });
+  return ok;
+}
+function upsertEndpointSpec(name, url, keyenv) {
+  const env = readEnvFile();
+  const cur = envGetStr(env, 'DEEP_ENDPOINTS');
+  const kept = cur.split(',').map((s) => s.trim()).filter((p) => p && p.split('|')[0] !== name);
+  kept.push(`${name}|${url}|${keyenv}`);
+  envSet({ DEEP_ENDPOINTS: kept.join(',') });
+}
+// OpenRouter's own key, stored like the wrapper resolves it: Keychain
+// (service deep-router, account openrouter) preferred, else OPENROUTER_API_KEY.
+function storeOpenRouterKey(key) {
+  let ok = false;
+  try { ok = spawnSync('security', ['add-generic-password', '-s', 'deep-router', '-a', 'openrouter', '-U', '-w', key], { stdio: 'ignore' }).status === 0; } catch {}
+  if (!ok) envSet({ OPENROUTER_API_KEY: key });
+  return ok;
+}
+
+async function pickHub() {
+  const env0 = readEnvFile();
+  const orAliases = envGetStr(env0, 'ROUTER_ALIASES').split(',').map((s) => s.trim()).filter(Boolean);
+  const aliasToId = {}; for (const p of orAliases) { const [a, id] = p.split('='); aliasToId[a] = id; }
+  const orDefRaw = envGetStr(env0, 'ROUTER_DEFAULT_MODEL');
+  const orDefId = aliasToId[orDefRaw] || orDefRaw;
+
+  const sources = [];
+  sources.push({
+    kind: 'openrouter', label: 'OpenRouter', key: API_KEY,
+    loaded: false, loading: false, rows: [], error: null,
+    selected: new Set(envGetStr(env0, 'ROUTER_MODELS').split(',').map((s) => s.trim()).filter(Boolean)),
+    def: orDefId || null,
+  });
+  for (const ep of parseEndpoints(env0)) {
+    const slug = epSlug(ep.name);
+    sources.push({
+      kind: 'endpoint', name: ep.name, url: ep.url, keyenv: ep.keyenv, label: ep.name,
+      key: process.env[ep.keyenv] || envGetStr(env0, ep.keyenv) || '',
+      loaded: false, loading: false, rows: [], error: null,
+      selected: new Set(envGetStr(env0, `DEEP_EP_MODELS_${slug}`).split(',').map((s) => s.trim()).filter(Boolean)),
+      def: envGetStr(env0, `DEEP_EP_DEFAULT_${slug}`) || null,
+    });
+  }
+  sources.push({ kind: 'map', label: '🎚 Map /model slots' });
+  sources.push({ kind: 'add', label: '＋ Add provider' });
+
+  // ONE global mapping of Claude Code's fixed /model tiers → any chosen model,
+  // from any provider. The proxy routes each id with the right key (endpoint
+  // models are prefixed "<name>/…" and sent direct; OpenRouter ids go upstream),
+  // so a single `deep-claude` session can mix providers across the tiers.
+  // Loaded from the proxy's existing ROUTER_* so prior mappings survive a re-save.
+  const TIERS = [
+    { key: 'default', label: 'Default', required: true },
+    { key: 'opus', label: 'Opus' },
+    { key: 'sonnet', label: 'Sonnet' },
+    { key: 'haiku', label: 'Haiku' },
+    { key: 'fable', label: 'Fable' },
+  ];
+  const gmap = {
+    default: orDefId || null,
+    opus: envGetStr(env0, 'ROUTER_SLOT_OPUS') || null,
+    sonnet: envGetStr(env0, 'ROUTER_SLOT_SONNET') || null,
+    haiku: envGetStr(env0, 'ROUTER_SLOT_HAIKU') || null,
+    fable: envGetStr(env0, 'ROUTER_SLOT_FABLE') || null,
+  };
+  // The pool the mapping draws from: every selected model across all providers,
+  // grouped by provider, each as the proxy-routable id (endpoints prefixed).
+  const globalPool = () => {
+    const pool = [];
+    for (const s of sources) {
+      if (s.kind === 'openrouter') for (const id of s.selected) pool.push({ id, provider: 'OpenRouter' });
+      else if (s.kind === 'endpoint') for (const m of s.selected) pool.push({ id: `${s.name}/${m}`, provider: s.name });
+    }
+    return pool;
+  };
+
+  let mode = 'providers';     // 'providers' | 'models' | 'gmap' | 'add' | 'keyedit'
+  let psel = 0;               // cursor in the providers list
+  let active = 0;             // provider being viewed in 'models'/'keyedit'
+  let cursor = 0, top = 0, query = '';
+  let mapCursor = 0;          // focused tier on the mapping screen
+  let form = null;            // add-provider form: { fields, focus, error, busy }
+  let keyEdit = null;         // { val, ret }  — ret is the mode to return to
+  let status = '';
+  const openedAt = Date.now();
+
+  const filtered = (s) => {
+    const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+    if (!terms.length) return s.rows;
+    return s.rows.filter((r) => terms.every((t) => r.hay.includes(t)));
+  };
+  const keyMark = (s) => (s.key ? `${C.green}key ✓${C.reset}` : `${C.gray}key —${C.reset}`);
+
+  async function ensureLoaded(s) {
+    if (!s || s.kind === 'add' || s.kind === 'map' || s.loaded || s.loading) return;
+    s.loading = true; render();
+    try {
+      if (s.kind === 'openrouter') {
+        if (!s.key) s.error = 'no OpenRouter key — press e to set one';
+        else { s.error = null; s.rows = buildOpenRouterRows(await fetchOpenRouterModels(s.key)); }
+      } else if (!s.key) {
+        s.error = 'no API key — press e to set one';
+      } else {
+        const r = await fetchEndpointModels(s.url, s.key);
+        if (r && r.error) s.error = 'no /models API — add models via deep-claude endpoints add';
+        else { s.error = null; s.rows = buildEndpointRows(r); }
+      }
+    } catch (e) { s.error = e.message; }
+    s.loaded = true; s.loading = false; render();
+  }
+
+  // ---- renderers (one per mode) --------------------------------------------
+  const renderProviders = () => {
+    let s = '\x1b[H\x1b[2J';
+    s += `${C.bold}${C.cyan}  deep-claude — providers${C.reset}   ${C.gray}↵ open · e set key · ${C.bold}⌃S save & quit${C.reset}\n`;
+    s += `${C.gray}  ${'─'.repeat(48)}${C.reset}\n\n`;
+    sources.forEach((src, i) => {
+      const cur = i === psel;
+      const mk = cur ? `${C.green}▸${C.reset}` : ' ';
+      if (src.kind === 'add' || src.kind === 'map') {
+        if (src.kind === 'map') s += '\n';   // a little breathing room before the action rows
+        s += `  ${mk} ${cur ? `${C.bold}${src.label}${C.reset}` : `${C.gray}${src.label}${C.reset}`}\n`;
+        return;
+      }
+      const plain = src.label.length > 20 ? src.label.slice(0, 19) + '…' : src.label.padEnd(20);
+      const name = cur ? `${C.bold}${plain}${C.reset}` : plain;
+      s += `  ${mk} ${name}  ${keyMark(src)}   ${C.gray}${src.selected.size} selected${C.reset}\n`;
+    });
+    s += `\n${C.gray}  ↑/↓ move · ↵ open · e set key · ${C.bold}⌃S save & quit${C.reset}${C.gray} · esc quit${C.reset}`;
+    if (status) s += `\n\n  ${C.green}${status}${C.reset}`;
+    out.write(s);
+  };
+
+  const renderModels = () => {
+    const src = sources[active];
+    const H = process.stdout.rows || 24;
+    let s = '\x1b[H\x1b[2J';
+    s += `${C.bold}${C.cyan}  ${src.label} ▸ models${C.reset}   ${C.gray}esc back · ${C.bold}⌃S save & quit${C.reset}\n\n`;
+    if (src.loading) { s += `${C.gray}  Fetching ${src.label} models…${C.reset}\n`; out.write(s); return; }
+    if (src.error) {
+      s += `${C.yellow}  ${src.error}${C.reset}\n`;
+      s += `\n${C.gray}  e set key · esc back${C.reset}`;
+      out.write(s); return;
+    }
+    const rowsArr = filtered(src);
+    const listH = Math.max(3, H - 8);
+    if (cursor >= rowsArr.length) cursor = Math.max(0, rowsArr.length - 1);
+    if (cursor < top) top = cursor;
+    if (cursor >= top + listH) top = cursor - listH + 1;
+    s += `${C.gray}  ${keyMark(src)}${C.gray} · ${rowsArr.length}/${src.rows.length} models · ${C.green}${src.selected.size} selected${C.gray}` +
+      (src.def ? ` · default ${C.reset}${src.def}` : '') + `${C.reset}\n`;
+    s += `${C.gray}  search: ${C.reset}${query}${C.gray}▏${C.reset}\n\n`;
+    const view = rowsArr.slice(top, top + listH);
+    for (let i = 0; i < view.length; i++) {
+      const r = view[i];
+      const isCur = top + i === cursor;
+      const box = src.selected.has(r.id) ? `${C.green}◉${C.reset}` : `${C.gray}◯${C.reset}`;
+      const star = src.def === r.id ? `${C.yellow}★${C.reset}` : ' ';
+      const line = `${box}${star} ${r.label}`;
+      s += isCur ? `${C.inv}> ${line} ${C.reset}\n` : `  ${line}\n`;
+    }
+    for (let i = view.length; i < listH; i++) s += '\n';
+    s += `\n${C.gray}  ↑/↓ · space/↵ select · type to search · ${C.reset}${C.bold}→ map /model${C.reset}${C.gray} · ← back · ${C.bold}⌃S save${C.reset}`;
+    if (status) s += `\n  ${C.green}${status}${C.reset}`;
+    out.write(s);
+  };
+
+  const renderGmap = () => {
+    const pool = globalPool();
+    let s = '\x1b[H\x1b[2J';
+    s += `${C.bold}${C.cyan}  Map /model slots${C.reset}   ${C.gray}← back · ${C.bold}⌃S save & quit${C.reset}\n`;
+    s += `${C.gray}  Each tier can run a model from ANY provider — the proxy routes it with your key.\n`;
+    s += `  In-session /model switches between them. ${pool.length} model(s) available across providers.${C.reset}\n\n`;
+    TIERS.forEach((t, i) => {
+      const cur = i === mapCursor;
+      const v = gmap[t.key];
+      const arrow = cur ? `${C.green}❯${C.reset}` : ' ';
+      const lhs = cur ? `${C.gray}‹${C.reset} ` : '  ';
+      const rhs = cur ? ` ${C.gray}›${C.reset}` : '';
+      const val = v ? v : `${C.gray}(use default)${C.reset}`;
+      const note = (cur && t.key === 'default') ? `${C.gray}  ← runs when you don't pass --model${C.reset}` : '';
+      s += `  ${arrow} ${C.bold}${t.label.padEnd(8)}${C.reset} ${lhs}${val}${rhs}${note}\n`;
+    });
+    s += `\n${C.gray}  ↑/↓ tier · ←/→ choose model (any provider) · esc back · ${C.bold}⌃S save & quit${C.reset}`;
+    if (status) s += `\n  ${C.green}${status}${C.reset}`;
+    out.write(s);
+  };
+
+  const renderAdd = () => {
+    let s = '\x1b[H\x1b[2J';
+    s += `${C.bold}${C.cyan}  ＋ Add a provider${C.reset}   ${C.gray}(any Anthropic/OpenAI-compatible URL)${C.reset}\n\n`;
+    form.fields.forEach((f, i) => {
+      const val = f.mask ? '•'.repeat(f.val.length) : f.val;
+      const cur = i === form.focus ? `${C.green}▏${C.reset}` : '';
+      const lab = (i === form.focus ? C.bold : C.gray) + f.label.padEnd(10) + C.reset;
+      s += `  ${lab}  ${val}${cur}\n`;
+    });
+    s += `\n  ${form.busy ? C.yellow + 'Adding…' + C.reset : `${C.green}[ ↵ add provider ]${C.reset}`}`;
+    if (form.error) s += `   ${C.red}${form.error}${C.reset}`;
+    s += `\n\n${C.gray}  type to edit · ↑/↓ field · ↵ add · esc back${C.reset}`;
+    out.write(s);
+  };
+
+  const renderKeyEdit = () => {
+    const src = sources[active];
+    let s = '\x1b[H\x1b[2J';
+    s += `${C.bold}${C.cyan}  Set API key — ${src.label}${C.reset}\n`;
+    s += `${C.gray}  stored in the Keychain when available · input is hidden${C.reset}\n\n`;
+    s += `  ${C.green}❯${C.reset} ${'•'.repeat(keyEdit.val.length)}${C.gray}▏${C.reset}\n`;
+    s += `\n${C.gray}  ↵ save · esc cancel${C.reset}`;
+    out.write(s);
+  };
+
+  const render = () => {
+    if (mode === 'add') return renderAdd();
+    if (mode === 'keyedit') return renderKeyEdit();
+    if (mode === 'gmap') return renderGmap();
+    if (mode === 'models') return renderModels();
+    return renderProviders();
+  };
+
+  // Open the global /model mapping. Needs ≥1 selected model somewhere; drops any
+  // tier pointing at a model that's no longer selected, and ensures a valid
+  // Default. The pool spans every provider's selections (endpoints prefixed).
+  const openGlobalMap = () => {
+    const pool = globalPool();
+    if (!pool.length) { status = 'select some models first — open a provider with ↵'; render(); return; }
+    const ids = new Set(pool.map((p) => p.id));
+    for (const t of TIERS) { if (t.key !== 'default' && gmap[t.key] && !ids.has(gmap[t.key])) gmap[t.key] = null; }
+    if (!gmap.default || !ids.has(gmap.default)) gmap.default = pool[0].id;
+    mode = 'gmap'; mapCursor = 0; status = ''; render();
+  };
+
+  // ---- transitions ----------------------------------------------------------
+  const openAddForm = () => {
+    mode = 'add';
+    form = { fields: [
+      { key: 'name', label: 'Name', val: '', mask: false },
+      { key: 'url', label: 'Base URL', val: '', mask: false },
+      { key: 'apikey', label: 'API key', val: '', mask: true },
+    ], focus: 0, error: '', busy: false };
+    render();
+  };
+
+  const openProvider = async (i) => {
+    const src = sources[i];
+    if (src.kind === 'add') { openAddForm(); return; }
+    if (src.kind === 'map') { openGlobalMap(); return; }
+    active = i; mode = 'models'; cursor = 0; top = 0; query = ''; status = '';
+    render();
+    await ensureLoaded(src);
+    render();
+  };
+
+  const openKeyEdit = (ret) => { keyEdit = { val: '', ret }; mode = 'keyedit'; render(); };
+
+  const saveKey = async () => {
+    const src = sources[active];
+    const ret = keyEdit.ret;
+    const key = keyEdit.val;
+    if (!key) { keyEdit = null; mode = ret; render(); return; }
+    if (src.kind === 'openrouter') {
+      storeOpenRouterKey(key);
+    } else {
+      if (!src.keyenv) src.keyenv = `DEEP_KEY_${epSlug(src.name)}`;
+      storeEndpointKey(src.name, src.keyenv, key);
+      upsertEndpointSpec(src.name, src.url, src.keyenv);
+    }
+    src.key = key;
+    src.loaded = false; src.error = null; src.rows = [];
+    keyEdit = null; mode = ret; status = 'key saved';
+    render();
+    if (ret === 'models') await ensureLoaded(src);
+    render();
+  };
+
+  // Resolve a provider's four /model slots: keep what the user assigned (drop
+  // any pointing at a now-unselected model); if they assigned nothing at all,
+  // fall back to name-matching the Claude tiers so a pure-Claude set still maps.
+  const saveAll = () => {
+    // Unified proxy allow-list = every selected model across all providers, as
+    // proxy-routable ids: OpenRouter ids as-is, endpoint models prefixed with the
+    // endpoint name ("<name>/<model>") so the proxy direct-routes them with your
+    // key. The global mapping (gmap) drives ROUTER_SLOT_* / ROUTER_DEFAULT_MODEL.
+    const models = [];
+    for (const src of sources) {
+      if (src.kind === 'openrouter') for (const id of src.selected) models.push(id);
+      else if (src.kind === 'endpoint') for (const m of src.selected) models.push(`${src.name}/${m}`);
+    }
+    if (models.length) {
+      const has = (id) => (id && models.includes(id)) ? id : '';
+      const def = (gmap.default && models.includes(gmap.default)) ? gmap.default : models[0];
+      envSet({
+        ROUTER_MODELS: models.join(','),
+        ROUTER_ALIASES: uniqueAliases(models).join(','),
+        ROUTER_DEFAULT_MODEL: def,
+        ROUTER_SLOT_OPUS: has(gmap.opus), ROUTER_SLOT_SONNET: has(gmap.sonnet),
+        ROUTER_SLOT_HAIKU: has(gmap.haiku), ROUTER_SLOT_FABLE: has(gmap.fable),
+      });
+    }
+    // Per-endpoint records, for the direct `deep-claude --endpoint <name>` mode.
+    for (const src of sources) {
+      if (src.kind !== 'endpoint') continue;
+      const chosen = [...src.selected];
+      if (!chosen.length) continue;
+      const slug = epSlug(src.name);
+      const def = src.def && chosen.includes(src.def) ? src.def : chosen[0];
+      envSet({ [`DEEP_EP_MODELS_${slug}`]: chosen.join(','), [`DEEP_EP_DEFAULT_${slug}`]: def });
+    }
+  };
+
+  const submitForm = async () => {
+    const name = form.fields[0].val.trim();
+    const url = form.fields[1].val.trim();
+    const key = form.fields[2].val;
+    if (!name || /[ ,|]/.test(name)) { form.error = 'name required, no spaces/,/|'; render(); return; }
+    if (!url || /[,|]/.test(url)) { form.error = 'valid base URL required'; render(); return; }
+    if (sources.some((s) => s.kind === 'endpoint' && s.name === name)) { form.error = 'provider already exists'; render(); return; }
+    form.busy = true; form.error = ''; render();
+    let keyenv = '';
+    if (key) { keyenv = `DEEP_KEY_${epSlug(name)}`; storeEndpointKey(name, keyenv, key); }
+    upsertEndpointSpec(name, url, keyenv);
+    const src = { kind: 'endpoint', name, url, keyenv, key, label: name,
+      loaded: false, loading: false, rows: [], error: null, selected: new Set(), def: null };
+    sources.splice(sources.length - 2, 0, src); // insert before the 🎚 Map / ＋ Add rows
+    form = null;
+    await openProvider(sources.indexOf(src));
+  };
+
+  setup();
+  process.on('exit', teardown);
+
+  const saved = await new Promise((resolve) => {
+    let detach = () => {};
+    const finish = (save) => {
+      detach();
+      if (save) saveAll();
+      teardown();
+      resolve(save);
+      return 'stop';
+    };
+
+    // One fully-formed key at a time (split escape sequences already reassembled
+    // by keyReader). Async transitions are fire-and-forget — they re-render when
+    // they settle — so the handler itself stays synchronous.
+    const onToken = (k) => {
+      if (Date.now() - openedAt < 150) return;
+
+      if (k === '\x03') return finish(false);                 // ctrl-c
+      if (k === '\x13' || k === '\x17') return finish(true);  // ctrl-s / ctrl-w: save & quit
+
+      if (mode === 'providers') {
+        if (k === '\x1b') return finish(false);               // esc: quit
+        if (k === '\x1b[A' || k === '\x1b[D') { psel = (psel - 1 + sources.length) % sources.length; render(); return; }
+        if (k === '\x1b[B' || k === '\x1b[C') { psel = (psel + 1) % sources.length; render(); return; }
+        if (k === '\r' || k === '\n') { openProvider(psel); return; }
+        if ((k === 'e' || k === 'E') && (sources[psel].kind === 'openrouter' || sources[psel].kind === 'endpoint')) { active = psel; openKeyEdit('providers'); return; }
+        return;
+      }
+
+      if (mode === 'add') {
+        const f = form.fields[form.focus];
+        if (k === '\x1b') { mode = 'providers'; form = null; render(); return; }
+        if (k === '\r' || k === '\n') { submitForm(); return; }
+        if (k === '\x1b[A') { form.focus = Math.max(0, form.focus - 1); render(); return; }
+        if (k === '\x1b[B' || k === '\t') { form.focus = Math.min(form.fields.length - 1, form.focus + 1); render(); return; }
+        if (k === '\x7f' || k === '\b') { f.val = f.val.slice(0, -1); render(); return; }
+        if (k.length === 1 && k >= ' ' && k <= '~') { f.val += k; render(); return; }
+        return;
+      }
+
+      if (mode === 'keyedit') {
+        if (k === '\x1b') { mode = keyEdit.ret; keyEdit = null; render(); return; }
+        if (k === '\r' || k === '\n') { saveKey(); return; }
+        if (k === '\x7f' || k === '\b') { keyEdit.val = keyEdit.val.slice(0, -1); render(); return; }
+        if (k.length === 1 && k >= ' ' && k <= '~') { keyEdit.val += k; render(); return; }
+        return;
+      }
+
+      if (mode === 'gmap') {
+        const t = TIERS[mapCursor];
+        if (k === '\x1b') { mode = 'providers'; status = ''; render(); return; }   // esc back to providers
+        if (k === '\x1b[A') { mapCursor = (mapCursor - 1 + TIERS.length) % TIERS.length; render(); return; }
+        if (k === '\x1b[B') { mapCursor = (mapCursor + 1) % TIERS.length; render(); return; }
+        if (k === '\x1b[C' || k === '\x1b[D') {                // ←/→ choose this tier's model (any provider)
+          const ids = globalPool().map((p) => p.id);
+          const opts = t.required ? ids : [null, ...ids];      // optional tiers can be "(use default)"
+          let idx = opts.indexOf(gmap[t.key]); if (idx < 0) idx = 0;
+          const dir = k === '\x1b[C' ? 1 : -1;
+          gmap[t.key] = opts[(idx + dir + opts.length) % opts.length]; render(); return;
+        }
+        return;
+      }
+
+      // mode === 'models'
+      const src = sources[active];
+      if (k === '\x1b' || k === '\x1b[D') { mode = 'providers'; status = ''; render(); return; }  // esc/← back
+      if (src.loading) return;
+      if (src.error) { if (k === 'e' || k === 'E') openKeyEdit('models'); return; }
+      const rowsArr = filtered(src);
+      if (k === '\x1b[A' || k === '\x10') { cursor = Math.max(0, cursor - 1); render(); return; }
+      if (k === '\x1b[B' || k === '\x0e') { cursor = Math.min(rowsArr.length - 1, cursor + 1); render(); return; }
+      if (k === '\x1b[C') { openGlobalMap(); return; }         // → open the global /model mapping
+      if (k === ' ' || k === '\r' || k === '\n') { const r = rowsArr[cursor]; if (r) { src.selected.has(r.id) ? src.selected.delete(r.id) : src.selected.add(r.id); cursor = Math.min(rowsArr.length - 1, cursor + 1); } render(); return; }
+      if (k === '\x7f' || k === '\b') { query = query.slice(0, -1); cursor = 0; top = 0; render(); return; }
+      if (k.length === 1 && k >= ' ' && k <= '~') { query += k; cursor = 0; top = 0; render(); return; }
+    };
+
+    detach = keyReader(onToken);
+    render();
+  });
+
+  if (saved) {
+    // The wizard prints its own closing note; stay quiet there to avoid a
+    // double/overlapping message (DEEP_PICK_QUIET set by the `cli` flow).
+    if (!process.env.DEEP_PICK_QUIET)
+      out.write(`\n${C.green}✓${C.reset} Saved. ${C.gray}Launch with${C.reset} ${C.bold}deep-claude${C.reset} ${C.gray}or${C.reset} ${C.bold}deep-claude --endpoint <name>${C.reset}\n`);
+  } else {
+    out.write('No changes made.\n');
+  }
+  process.exit(0);
+}
+
+const MODE = process.env.DEEP_PICK_MODE || 'openrouter';
+const entry = MODE === 'hub' ? pickHub : MODE === 'endpoint' ? pickEndpoint : pickOpenRouter;
+entry().catch((e) => { teardown(); fail(e && e.stack ? e.stack : String(e)); });

@@ -33,6 +33,36 @@ DEEP_CLAUDE_ENV_FILE="$tmpenv" ./bin/deep-claude endpoints remove deepseek >/dev
 ! grep -q 'DEEP_ENDPOINTS=deepseek' "$tmpenv"
 rm -f "$tmpenv"
 
+# --- per-endpoint models: default resolution + /model slot wiring -------------
+tmpenv="$(mktemp)"
+{
+  echo 'DEEP_ENDPOINTS="ds|https://api.deepseek.com/anthropic|"'
+  echo 'DEEP_EP_MODELS_DS="deepseek-chat,deepseek-reasoner"'
+  echo 'DEEP_EP_DEFAULT_DS="deepseek-reasoner"'
+} >"$tmpenv"
+# No --model -> launches on the configured default.
+epdef="$(CLAUDE_BIN=/bin/echo DEEP_CLAUDE_ENV_FILE="$tmpenv" \
+  ./bin/deep-claude --endpoint ds -p hi 2>/dev/null)"
+[[ "$epdef" == "--model deepseek-reasoner -p hi" ]]
+# --model still overrides the configured default at launch.
+epov="$(CLAUDE_BIN=/bin/echo DEEP_CLAUDE_ENV_FILE="$tmpenv" \
+  ./bin/deep-claude --endpoint ds --model deepseek-chat -p hi 2>/dev/null)"
+[[ "$epov" == "--model deepseek-chat -p hi" ]]
+# Without explicit slots, the endpoint's models populate /model positionally
+# (opus<-first, sonnet<-second).
+stub="$(mktemp)"; printf '#!/bin/sh\necho "OPUS=$ANTHROPIC_DEFAULT_OPUS_MODEL SONNET=$ANTHROPIC_DEFAULT_SONNET_MODEL HAIKU=$ANTHROPIC_DEFAULT_HAIKU_MODEL"\n' >"$stub"; chmod +x "$stub"
+slots="$(CLAUDE_BIN="$stub" DEEP_CLAUDE_ENV_FILE="$tmpenv" ./bin/deep-claude --endpoint ds 2>/dev/null)"
+[[ "$slots" == "OPUS=deepseek-chat SONNET=deepseek-reasoner HAIKU=deepseek-reasoner" ]]
+# Explicit per-slot assignments (set in the picker) override the positional default.
+{
+  echo 'DEEP_EP_SLOT_OPUS_DS="deepseek-reasoner"'
+  echo 'DEEP_EP_SLOT_SONNET_DS="deepseek-chat"'
+  echo 'DEEP_EP_SLOT_HAIKU_DS="deepseek-chat"'
+} >>"$tmpenv"
+eslots="$(CLAUDE_BIN="$stub" DEEP_CLAUDE_ENV_FILE="$tmpenv" ./bin/deep-claude --endpoint ds 2>/dev/null)"
+[[ "$eslots" == "OPUS=deepseek-reasoner SONNET=deepseek-chat HAIKU=deepseek-chat" ]]
+rm -f "$tmpenv" "$stub"
+
 # --- OpenRouter model-curation CLI --------------------------------------------
 tmpenv="$(mktemp)"
 DEEP_CLAUDE_ENV_FILE="$tmpenv" ./bin/deep-claude models add google/gemini-3.5-flash gemini >/dev/null
@@ -64,8 +94,8 @@ node - <<'NODE'
 const http = require('http');
 const { spawn } = require('child_process');
 
-const UP_PORT = 8901, PROXY_PORT = 8902;
-let captured = null;
+const UP_PORT = 8901, PROXY_PORT = 8902, EP_PORT = 8905;
+let captured = null, epCaptured = null;
 
 const upstream = http.createServer((req, res) => {
   let body = '';
@@ -77,22 +107,36 @@ const upstream = http.createServer((req, res) => {
   });
 });
 
+// A personal-endpoint upstream — models prefixed "myep/" must route here direct.
+const epstream = http.createServer((req, res) => {
+  let body = '';
+  req.on('data', (c) => (body += c));
+  req.on('end', () => {
+    epCaptured = { url: req.url, headers: req.headers, body: JSON.parse(body || '{}') };
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ id: 'msg_2', type: 'message', role: 'assistant', content: [], model: epCaptured.body.model }));
+  });
+});
+
 function die(msg) { console.error('FAIL:', msg); process.exit(1); }
 
-upstream.listen(UP_PORT, '127.0.0.1', () => {
+epstream.listen(EP_PORT, '127.0.0.1', () => upstream.listen(UP_PORT, '127.0.0.1', () => {
   const proxy = spawn('node', [__dirname + '/bin/deep-claude-proxy'], {
     env: {
       ...process.env,
       ROUTER_PORT: String(PROXY_PORT),
       OPENROUTER_API_KEY: 'testkey',
       OPENROUTER_BASE_URL: `http://127.0.0.1:${UP_PORT}`,
-      ROUTER_MODELS: 'anthropic/claude-opus-4.8',
+      // Unified allow-list mixing an OpenRouter model and an endpoint-prefixed one.
+      ROUTER_MODELS: 'anthropic/claude-opus-4.8,myep/foo-pro',
       ROUTER_ALIASES: 'gemini=google/gemini-3.5-flash',
+      DEEP_ENDPOINTS: `myep|http://127.0.0.1:${EP_PORT}|DEEP_KEY_MYEP`,
+      DEEP_KEY_MYEP: 'epsecret',
     },
     stdio: 'ignore',
   });
 
-  const done = (ok) => { proxy.kill(); upstream.close(); process.exit(ok ? 0 : 1); };
+  const done = (ok) => { proxy.kill(); upstream.close(); epstream.close(); process.exit(ok ? 0 : 1); };
 
   const wait = async () => {
     for (let i = 0; i < 50; i++) {
@@ -124,9 +168,22 @@ upstream.listen(UP_PORT, '127.0.0.1', () => {
     if (beta.includes('context-management')) die('context-management beta not stripped: ' + beta);
     if (!beta.includes('fine-grained-tool-streaming')) die('other betas dropped: ' + beta);
 
+    // Cross-provider: an endpoint-prefixed model routes DIRECT to that endpoint
+    // (its own key, prefix stripped) instead of OpenRouter — the basis of mixing
+    // providers across the /model tiers in one session.
+    const r2 = await fetch(`http://127.0.0.1:${PROXY_PORT}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'myep/foo-pro', max_tokens: 16, messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    if (!r2.ok) die('direct route returned ' + r2.status);
+    if (!epCaptured) die('endpoint-prefixed model did not route to the endpoint upstream');
+    if (epCaptured.body.model !== 'foo-pro') die('provider prefix not stripped: ' + epCaptured.body.model);
+    if (epCaptured.headers['x-api-key'] !== 'epsecret') die("endpoint's own key not used: " + epCaptured.headers['x-api-key']);
+
     done(true);
   })().catch((e) => { console.error(e); done(false); });
-});
+}));
 NODE
 
 # --- proxy: thinking-block stripping for non-Claude SSE responses. -------------

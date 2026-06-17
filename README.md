@@ -47,7 +47,10 @@ swap the brain.
   hundreds more behind a single endpoint.
 - **A curated, pretty picker.** `deep-claude pick` is a searchable, multi-select TUI over the whole
   catalog (with context windows and pricing), and assigns your picks to Claude Code's switch slots so
-  you can flip between them in-session.
+  you can flip between them in-session. It's a **two-level provider picker**: the first screen lists
+  every provider (OpenRouter plus each personal endpoint) — set a provider's API key with `e`, add a
+  new one with `＋ Add provider`, then press `↵` to drill into that provider's models. The OpenRouter
+  key itself lives here too, so one screen manages every key. `⌃S` saves everything.
 - **Real multi-model workflows.** A sub-agent's `model:` accepts a full model id, so one workflow can
   run many models at once — the orchestrator on one, sub-agents pinned to others (proven end-to-end).
 - **Keep your setup.** `--inherit` brings your existing skills, agents, workflows, plugins, hooks, and
@@ -100,7 +103,8 @@ cd deep-claude
 export PATH="$HOME/.local/bin:$PATH"     # if it isn't already
 ```
 
-Then just run it — the **first run walks you through setup** (enter your [OpenRouter key](https://openrouter.ai/keys), then pick your models):
+Then just run it — the **first run walks you through setup** in the provider picker (press `e` on
+OpenRouter to paste your [OpenRouter key](https://openrouter.ai/keys), then `↵` to pick your models):
 
 ```bash
 deep-claude              # first run → setup wizard, then starts the session
@@ -132,19 +136,52 @@ deep-claude pick
 ```
 
 ```
-  Select models to expose
-  17/337 models  ·  2 selected
-  search: gemini▏
+  deep-claude — providers   ↵ open · e set key · ⌃S save & quit
+  ────────────────────────────────────────────────
 
-  ◉ google/gemini-2.5-flash      1.0M  $0.30/$2.50   Google: Gemini 2.5 Flash
-> ◉ google/gemini-2.5-pro        1.0M  $1.25/$10     Google: Gemini 2.5 Pro
-    ↑/↓ move · space select · type to search · ↵ confirm · esc cancel
+  ▸ OpenRouter            key ✓   3 selected
+    z-ai-glm              key ✓   3 selected
+    deepseek-custom       key ✓   2 selected
+
+    🎚 Map /model slots
+    ＋ Add provider
+
+  ↑/↓ move · ↵ open · e set key · ⌃S save & quit · esc quit
 ```
 
-After selecting, a second screen lets you assign models to Claude Code's switch slots
-(Default + Fable/Opus/Sonnet/Haiku — see [Switching models](#switching-models-inside-a-session)). The
-picker writes `ROUTER_MODELS` / `ROUTER_ALIASES` / `ROUTER_DEFAULT_MODEL` / `ROUTER_SLOT_*` to `.env`.
-Curate non-interactively if you prefer:
+The picker is **two-level**. The first screen lists every provider; `↑/↓` (or `←/→`) move, `e` sets the
+selected provider's API key — **including OpenRouter's own key** — and `＋ Add provider` adds a new
+endpoint inline (name → URL → key). Press `↵` on a provider to drill into its model list and pick models
+(`space`/`↵` toggle, type to search). Do this for as many providers as you like.
+
+Then open **`🎚 Map /model slots`** — one global screen that maps Claude Code's fixed in-session `/model`
+tiers (Default / Opus / Sonnet / Haiku / Fable) to your chosen models, **drawing from every provider at
+once**:
+
+```
+  Map /model slots   ← back · ⌃S save & quit
+  Each tier can run a model from ANY provider — the proxy routes it with your key.
+  In-session /model switches between them. 8 model(s) available across providers.
+
+  ❯ Default ‹ x-ai/grok-4.3 ›            ← runs when you don't pass --model
+    Opus     z-ai-glm/glm-5-turbo        (direct to z.ai, your key)
+    Sonnet   deepseek-custom/deepseek-v4-pro   (direct to DeepSeek)
+    Haiku    x-ai/grok-4.3               (OpenRouter)
+    Fable    (use default)
+  ↑/↓ tier · ←/→ choose model (any provider) · esc back · ⌃S save & quit
+```
+
+Claude Code's `/model` only exposes those fixed tiers — you can't add arbitrary-named entries — so this
+maps each tier onto a real model. **Crucially, different tiers can come from different providers**: the
+proxy routes each id with the right key (endpoint models are sent direct as `<provider>/<model>`,
+OpenRouter ids go upstream), so one `deep-claude` session can run Opus on GLM, Sonnet on DeepSeek, and
+Haiku on Grok — switch between them live with `/model`. `↑/↓` pick a tier, `←/→` choose the model
+(optional tiers can be "(use default)"). **`Ctrl-S` saves and quits.** The mapping is persistent.
+
+This writes a unified `ROUTER_MODELS` (every selected model, endpoints prefixed) plus `ROUTER_ALIASES` /
+`ROUTER_DEFAULT_MODEL` / `ROUTER_SLOT_*` that the proxy consumes; each endpoint also keeps
+`DEEP_EP_MODELS_<name>` / `DEEP_EP_DEFAULT_<name>` for the single-provider `deep-claude --endpoint <name>`
+shortcut. Curate non-interactively if you prefer:
 
 ```bash
 deep-claude models add google/gemini-3.5-flash      gemini   # id + optional alias
@@ -198,7 +235,15 @@ It symlinks those config dirs/files and merges your MCP servers (from `~/.claude
 ## Personal endpoints
 
 OpenRouter is the default, but any **Anthropic-compatible** endpoint — DeepSeek-direct, a local
-Ollama, a self-hosted gateway — is a second-tier option. Save one and reuse it:
+Ollama, a self-hosted gateway — is a second-tier option. The quickest way is the **interactive**
+form — it prompts for a name, the base URL, and your key (input hidden), stores the key in your
+Keychain (or `.env`), and saves the endpoint:
+
+```bash
+deep-claude endpoints add        # prompts: Name → Base URL → API key
+```
+
+Or pass it all on one line:
 
 ```bash
 deep-claude endpoints add deepseek https://api.deepseek.com/anthropic DEEPSEEK_API_KEY
@@ -208,6 +253,44 @@ deep-claude endpoints list
 deep-claude --endpoint deepseek --model deepseek-v4-pro
 deep-claude --endpoint ollama   --model qwen3-coder -p "write a test"
 ```
+
+The `deep-claude cli` provider picker also adds endpoints inline — `＋ Add provider` (name → URL → key),
+which fetches the endpoint's models and drops you straight into selecting them.
+
+#### Multiple models per endpoint, selectable in the CLI
+
+The interactive `endpoints add` also asks for a **comma-separated list of model ids** and a default.
+With those saved, the endpoint behaves like the OpenRouter set — you don't pass `--model` every time,
+and you can switch between the models in-session:
+
+```bash
+deep-claude endpoints add
+#   Name:   deepseek-custom
+#   URL:    https://api.deepseek.com/anthropic
+#   Key:    sk-…                       (hidden)
+#   Models: deepseek-chat,deepseek-reasoner
+#   Default: deepseek-chat
+
+deep-claude --endpoint deepseek-custom                       # launches on the default model
+deep-claude --endpoint deepseek-custom --model deepseek-reasoner   # pick one at launch
+```
+
+**Browse the endpoint's catalog** instead of typing ids. The interactive add offers it, or run it any
+time against a saved endpoint — it's the same multi-select TUI as the OpenRouter picker, fed by the
+endpoint's own `/v1/models`:
+
+```bash
+deep-claude endpoints pick deepseek-custom    # multi-select models + a default
+```
+
+(If the endpoint exposes no model-list API, the picker says so and you fall back to typing ids.)
+
+**Selecting in the CLI** — three ways:
+
+- **At launch:** `--model <id>` picks any of the endpoint's models for that run; omit it to get the default.
+- **In-session:** the configured models are mapped onto Claude Code's `/model` switch slots, so `/model`
+  flips between them live (the status line shows which one is active).
+- **Review what's set:** `deep-claude endpoints list` prints each endpoint's models and default.
 
 The third argument names the **environment variable** holding that endpoint's key (resolved from your
 shell or `.env`). Or skip the save and pass it inline:
