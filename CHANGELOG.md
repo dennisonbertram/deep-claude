@@ -22,6 +22,15 @@ All notable changes to this project are documented here. The format is based on
 - **Per-endpoint slot wiring.** `deep-claude --endpoint <name>` maps that
   endpoint's models onto the `/model` tiers (`DEEP_EP_SLOT_<TIER>_<name>`, with a
   positional fallback).
+- **Provider labels in `🎚 Map /model slots`.** Each tier's model now shows the
+  provider it routes through (`· OpenRouter` / `· <endpoint>`), so vendor-prefixed
+  OpenRouter ids (`x-ai/…`, `google/…`, `anthropic/…`) are no longer mistaken for
+  endpoint models — or for missing.
+- **Manual model entry for endpoints without a listable catalog.** When a
+  provider's `/v1/models` can't be listed (e.g. Fireworks' serverless endpoint
+  returns an error), the picker drops into a manual mode: it shows the
+  already-selected models and lets you type a model id and press `↵` to add it, so
+  the provider stays fully usable from the picker like any other.
 - Tests: proxy direct-routing for endpoint-prefixed models (prefix stripped,
   endpoint's own `x-api-key`), explicit per-endpoint slot precedence, and a
   split-escape-sequence regression guard.
@@ -45,3 +54,18 @@ All notable changes to this project are documented here. The format is based on
   it as Escape if nothing follows.
 - Repaired `ROUTER_MODELS` / `ROUTER_ALIASES` values that had accumulated stray
   quote runs (which broke `~`-prefixed model ids when the `.env` was sourced).
+- **OpenRouter "owning" endpoint models in the picker.** The hub seeded
+  OpenRouter's selection from the entire unified `ROUTER_MODELS`, which also holds
+  endpoint-prefixed ids — so OpenRouter absorbed endpoint models, cluttering the
+  `🎚 Map /model slots` pool with duplicates and re-writing duplicate
+  `ROUTER_MODELS` / `ROUTER_ALIASES` (`<alias>-2`) entries on every save.
+  OpenRouter is now seeded with its native ids only, and the save path
+  de-duplicates the unified model list.
+- **`deep-claude --endpoint <name>` failing with a 401.** The direct-endpoint
+  path resolved the key from the shell env and `.env` only — never the Keychain,
+  where the picker stores endpoint keys by default — so it sent an empty key. It
+  now uses the full env → `.env` → Keychain chain (matching the proxy path).
+- **Keyless endpoints showing "no API key" instead of loading.** The picker
+  bailed out before fetching when an endpoint had no key, even though the model
+  fetch supports unauthenticated requests. It now attempts the fetch and only
+  prompts for a key if that attempt fails.

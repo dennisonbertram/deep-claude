@@ -750,10 +750,19 @@ run_main() {
   fi
 
   if [[ -n "$base_url" ]]; then
+    # Resolve the key: explicit --api-key wins; otherwise, for a saved endpoint
+    # use the full chain (shell env, .env, then Keychain) so a key stored by the
+    # picker — which defaults to the Keychain — is actually found. For a bare
+    # --base-url (no endpoint name, hence no Keychain account) fall back to
+    # env/.env only.
     local key="$api_key"
-    if [[ -z "$key" && -n "$api_key_env" ]]; then
-      key="${!api_key_env:-}"
-      [[ -z "$key" ]] && key="$(env_get "$api_key_env")"
+    if [[ -z "$key" ]]; then
+      if [[ -n "$endpoint" ]]; then
+        key="$(resolve_endpoint_key "$endpoint" "$api_key_env")"
+      elif [[ -n "$api_key_env" ]]; then
+        key="${!api_key_env:-}"
+        [[ -z "$key" ]] && key="$(env_get "$api_key_env")"
+      fi
     fi
     run_endpoint "$base_url" "$key" "$model" "$endpoint" ${args[@]+"${args[@]}"}
   else

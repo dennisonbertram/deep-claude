@@ -558,11 +558,21 @@ async function pickHub() {
   const orDefRaw = envGetStr(env0, 'ROUTER_DEFAULT_MODEL');
   const orDefId = aliasToId[orDefRaw] || orDefRaw;
 
+  // ROUTER_MODELS is the UNIFIED allow-list: OpenRouter-native ids PLUS every
+  // endpoint's models, prefixed "<endpoint>/<model>". Seeding OpenRouter's
+  // selection from the whole list would make OpenRouter wrongly "own" endpoint
+  // models — flooding the slot-mapping pool with duplicates and re-writing
+  // duplicate ROUTER_MODELS/ROUTER_ALIASES entries on every save. Partition by
+  // endpoint name: an id is OpenRouter-native iff its first path segment is NOT
+  // one of the user's endpoints.
+  const epNames = new Set(parseEndpoints(env0).map((e) => e.name));
+  const isEndpointId = (id) => { const i = id.indexOf('/'); return i > 0 && epNames.has(id.slice(0, i)); };
+
   const sources = [];
   sources.push({
     kind: 'openrouter', label: 'OpenRouter', key: API_KEY,
     loaded: false, loading: false, rows: [], error: null,
-    selected: new Set(envGetStr(env0, 'ROUTER_MODELS').split(',').map((s) => s.trim()).filter(Boolean)),
+    selected: new Set(envGetStr(env0, 'ROUTER_MODELS').split(',').map((s) => s.trim()).filter(Boolean).filter((id) => !isEndpointId(id))),
     def: orDefId || null,
   });
   for (const ep of parseEndpoints(env0)) {
@@ -619,6 +629,7 @@ async function pickHub() {
   const openedAt = Date.now();
 
   const filtered = (s) => {
+    if (s.manual) return s.rows;   // manual mode: the query is a new model id to add, not a filter
     const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
     if (!terms.length) return s.rows;
     return s.rows.filter((r) => terms.every((t) => r.hay.includes(t)));
@@ -632,12 +643,23 @@ async function pickHub() {
       if (s.kind === 'openrouter') {
         if (!s.key) s.error = 'no OpenRouter key — press e to set one';
         else { s.error = null; s.rows = buildOpenRouterRows(await fetchOpenRouterModels(s.key)); }
-      } else if (!s.key) {
-        s.error = 'no API key — press e to set one';
       } else {
+        // Endpoints may be keyless (e.g. a local server) — fetchEndpointModels
+        // falls back to an unauthenticated request when the key is empty, so try
+        // the fetch either way instead of bailing out early. Only surface a key
+        // hint if the (possibly keyless) attempt actually fails.
         const r = await fetchEndpointModels(s.url, s.key);
-        if (r && r.error) s.error = 'no /models API — add models via deep-claude endpoints add';
-        else { s.error = null; s.rows = buildEndpointRows(r); }
+        if (r && r.error) {
+          // No listable catalog (some providers — e.g. Fireworks' serverless
+          // /v1/models — return an error). Drop into manual mode: show whatever
+          // is already selected and let the user TYPE model ids to add, so the
+          // provider stays fully usable from the picker like any other.
+          s.manual = true;
+          s.rows = buildEndpointRows([...s.selected].map((id) => ({ id })));
+          s.error = (!s.key && s.selected.size === 0)
+            ? 'no key — press e, then type model ids to add'
+            : null;
+        } else { s.manual = false; s.error = null; s.rows = buildEndpointRows(r); }
       }
     } catch (e) { s.error = e.message; }
     s.loaded = true; s.loading = false; render();
@@ -683,7 +705,7 @@ async function pickHub() {
     if (cursor >= top + listH) top = cursor - listH + 1;
     s += `${C.gray}  ${keyMark(src)}${C.gray} · ${rowsArr.length}/${src.rows.length} models · ${C.green}${src.selected.size} selected${C.gray}` +
       (src.def ? ` · default ${C.reset}${src.def}` : '') + `${C.reset}\n`;
-    s += `${C.gray}  search: ${C.reset}${query}${C.gray}▏${C.reset}\n\n`;
+    s += `${C.gray}  ${src.manual ? 'add model id' : 'search'}: ${C.reset}${query}${C.gray}▏${C.reset}\n\n`;
     const view = rowsArr.slice(top, top + listH);
     for (let i = 0; i < view.length; i++) {
       const r = view[i];
@@ -694,13 +716,22 @@ async function pickHub() {
       s += isCur ? `${C.inv}> ${line} ${C.reset}\n` : `  ${line}\n`;
     }
     for (let i = view.length; i < listH; i++) s += '\n';
-    s += `\n${C.gray}  ↑/↓ · space/↵ select · type to search · ${C.reset}${C.bold}→ map /model${C.reset}${C.gray} · ← back · ${C.bold}⌃S save${C.reset}`;
+    s += `\n${C.gray}  ` + (src.manual
+      ? `type a model id · ${C.reset}${C.bold}↵ add${C.reset}${C.gray} · space toggle · `
+      : `↑/↓ · space/↵ select · type to search · `) +
+      `${C.reset}${C.bold}→ map /model${C.reset}${C.gray} · ← back · ${C.bold}⌃S save${C.reset}`;
     if (status) s += `\n  ${C.green}${status}${C.reset}`;
     out.write(s);
   };
 
   const renderGmap = () => {
     const pool = globalPool();
+    // Tag each model with the provider it routes through. OpenRouter ids are
+    // vendor-prefixed (x-ai/…, google/…, anthropic/…) and otherwise look just
+    // like endpoint ids, so without this it's not obvious which slots are on
+    // OpenRouter vs a personal endpoint.
+    const provById = {}; for (const p of pool) provById[p.id] = p.provider;
+    const provTag = (id) => { const p = provById[id]; return p ? ` ${C.gray}·${C.reset} ${C.cyan}${p}${C.reset}` : ''; };
     let s = '\x1b[H\x1b[2J';
     s += `${C.bold}${C.cyan}  Map /model slots${C.reset}   ${C.gray}← back · ${C.bold}⌃S save & quit${C.reset}\n`;
     s += `${C.gray}  Each tier can run a model from ANY provider — the proxy routes it with your key.\n`;
@@ -711,7 +742,7 @@ async function pickHub() {
       const arrow = cur ? `${C.green}❯${C.reset}` : ' ';
       const lhs = cur ? `${C.gray}‹${C.reset} ` : '  ';
       const rhs = cur ? ` ${C.gray}›${C.reset}` : '';
-      const val = v ? v : `${C.gray}(use default)${C.reset}`;
+      const val = v ? `${v}${provTag(v)}` : `${C.gray}(use default)${C.reset}`;
       const note = (cur && t.key === 'default') ? `${C.gray}  ← runs when you don't pass --model${C.reset}` : '';
       s += `  ${arrow} ${C.bold}${t.label.padEnd(8)}${C.reset} ${lhs}${val}${rhs}${note}\n`;
     });
@@ -817,9 +848,11 @@ async function pickHub() {
     // endpoint name ("<name>/<model>") so the proxy direct-routes them with your
     // key. The global mapping (gmap) drives ROUTER_SLOT_* / ROUTER_DEFAULT_MODEL.
     const models = [];
+    const seenIds = new Set();
+    const addModel = (id) => { if (!seenIds.has(id)) { seenIds.add(id); models.push(id); } };
     for (const src of sources) {
-      if (src.kind === 'openrouter') for (const id of src.selected) models.push(id);
-      else if (src.kind === 'endpoint') for (const m of src.selected) models.push(`${src.name}/${m}`);
+      if (src.kind === 'openrouter') for (const id of src.selected) addModel(id);
+      else if (src.kind === 'endpoint') for (const m of src.selected) addModel(`${src.name}/${m}`);
     }
     if (models.length) {
       const has = (id) => (id && models.includes(id)) ? id : '';
@@ -935,6 +968,16 @@ async function pickHub() {
       if (k === '\x1b[A' || k === '\x10') { cursor = Math.max(0, cursor - 1); render(); return; }
       if (k === '\x1b[B' || k === '\x0e') { cursor = Math.min(rowsArr.length - 1, cursor + 1); render(); return; }
       if (k === '\x1b[C') { openGlobalMap(); return; }         // → open the global /model mapping
+      // Manual mode (no listable catalog): Enter on a typed id ADDS it as a
+      // selected model — this is how you populate e.g. a Fireworks endpoint.
+      if (src.manual && (k === '\r' || k === '\n') && query.trim()) {
+        const id = query.trim();
+        if (!src.rows.some((r) => r.id === id)) src.rows.push({ id, label: id, hay: id.toLowerCase() });
+        src.selected.add(id);
+        if (!src.def) src.def = id;
+        query = ''; top = 0; cursor = Math.max(0, src.rows.length - 1);
+        status = `added ${id}`; render(); return;
+      }
       if (k === ' ' || k === '\r' || k === '\n') { const r = rowsArr[cursor]; if (r) { src.selected.has(r.id) ? src.selected.delete(r.id) : src.selected.add(r.id); cursor = Math.min(rowsArr.length - 1, cursor + 1); } render(); return; }
       if (k === '\x7f' || k === '\b') { query = query.slice(0, -1); cursor = 0; top = 0; render(); return; }
       if (k.length === 1 && k >= ' ' && k <= '~') { query += k; cursor = 0; top = 0; render(); return; }
