@@ -66,6 +66,10 @@ const ALLOWED = new Set([...MODELS, ...Object.values(ALIASES)]);
 // endpoint) is sent straight to that provider's API with your own key, instead
 // of through OpenRouter. The prefix is stripped for the direct call
 // (deepseek/deepseek-v4-pro -> deepseek-v4-pro). DEEP_ENDPOINTS: name|url|KEYENV.
+// Each endpoint's auth scheme is read from DEEP_EP_AUTH_<SLUG> (default
+// x-api-key); some providers (e.g. Baseten) require Authorization: Bearer/Api-Key
+// and reject x-api-key.
+const epAuthSlug = (name) => name.toUpperCase().replace(/[^A-Z0-9]/g, '_');
 const DIRECT = {};
 for (const entry of (process.env.DEEP_ENDPOINTS || '').split(',')) {
   const t = entry.trim();
@@ -77,7 +81,8 @@ for (const entry of (process.env.DEEP_ENDPOINTS || '').split(',')) {
   const i2 = rest.indexOf('|');
   const url = i2 < 0 ? rest : rest.slice(0, i2);
   const keyenv = i2 < 0 ? '' : rest.slice(i2 + 1);
-  if (name && url) DIRECT[name] = { url: url.replace(/\/+$/, ''), keyenv };
+  const auth = (process.env['DEEP_EP_AUTH_' + epAuthSlug(name)] || 'x-api-key').toLowerCase();
+  if (name && url) DIRECT[name] = { url: url.replace(/\/+$/, ''), keyenv, auth };
 }
 
 function log(...args) {
@@ -286,7 +291,12 @@ async function forward(req, res, path, raw) {
     }
     parsed.model = parsed.model.slice(pfx.length + 1); // strip provider prefix
     upstreamUrl = `${direct.url}${path}`;
-    headers['x-api-key'] = dkey;
+    // Authenticate with the scheme this endpoint expects. Default is x-api-key
+    // (the Anthropic norm); some providers — e.g. Baseten — require
+    // Authorization: Bearer/Api-Key and reject x-api-key.
+    if (direct.auth === 'bearer') headers['authorization'] = `Bearer ${dkey}`;
+    else if (direct.auth === 'api-key' || direct.auth === 'apikey') headers['authorization'] = `Api-Key ${dkey}`;
+    else headers['x-api-key'] = dkey;
   } else {
     upstreamUrl = `${UPSTREAM}${path}`;
     headers.authorization = `Bearer ${API_KEY}`;

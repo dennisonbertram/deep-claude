@@ -31,6 +31,10 @@ All notable changes to this project are documented here. The format is based on
   returns an error), the picker drops into a manual mode: it shows the
   already-selected models and lets you type a model id and press `↵` to add it, so
   the provider stays fully usable from the picker like any other.
+- **Per-endpoint auth scheme for direct routes.** `DEEP_EP_AUTH_<SLUG>` selects
+  how the proxy authenticates a direct endpoint — `x-api-key` (default),
+  `bearer`, or `api-key` — so providers that reject `x-api-key` and require
+  `Authorization: Bearer`/`Api-Key` (e.g. Baseten) work as first-class endpoints.
 - Tests: proxy direct-routing for endpoint-prefixed models (prefix stripped,
   endpoint's own `x-api-key`), explicit per-endpoint slot precedence, and a
   split-escape-sequence regression guard.
