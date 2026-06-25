@@ -27,7 +27,9 @@ done
 SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
 PROJECT_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 ENV_FILE="${DEEP_CLAUDE_ENV_FILE:-$PROJECT_DIR/.env}"
-STATE_DIR="$PROJECT_DIR/.deep-claude-home"
+# Isolated home for Claude Code state (config/cache/data + our settings.json).
+# Overridable so tests can run against a throwaway dir instead of the real home.
+STATE_DIR="${DEEP_CLAUDE_STATE_DIR:-$PROJECT_DIR/.deep-claude-home}"
 
 usage() {
   cat <<'EOF'
@@ -52,15 +54,39 @@ Personal endpoints (DeepSeek-direct, local models, self-hosted) are second-tier:
   deep-claude --endpoint deepseek --model deepseek-v4-pro
 
 Use your existing Claude setup (skills, plugins, agents, workflows, MCP servers):
-  deep-claude --inherit                  for one run, or set DEEP_CLAUDE_INHERIT=1 in .env
+  Inherit is ON by default. Your ~/.claude skills/agents/workflows/plugins/hooks/
+  rules/CLAUDE.md/MCP servers are linked into the isolated home each launch.
+  Your Anthropic login and credentials are never imported.
+  deep-claude --no-inherit               opt out for one run, or set DEEP_CLAUDE_INHERIT=0 in .env
+
+Session sharing (ON by default):
+  Transcript history (projects/) is symlinked to ~/.claude/projects so sessions
+  started in deep-claude are resumable with plain `claude --resume` and vice-versa.
+  deep-claude --no-share-sessions        opt out for one run, or set DEEP_CLAUDE_SHARE_SESSIONS=0
+  NOTE: ~/.claude/settings.json and .credentials.json are never shared (auth stays isolated).
+  NOTE: sessions/ (live PID registry) and file-history/ stay isolated.
+  Aborted sessions that never flushed a .jsonl won't appear in either store.
+
+Filesystem sandbox (opt-in):
+  deep-claude --sandbox [...]            confine writes to cwd/state/tmp; reads/exec/net allowed.
+  deep-claude --no-sandbox [...]         explicitly disable (default).
+  DEEP_CLAUDE_SANDBOX=1                  enable via .env.
+  DEEP_CLAUDE_SANDBOX_NET=loopback       restrict net to loopback only (Darwin only).
+  FAIL CLOSED: if --sandbox is requested but sandbox-exec (macOS) or bwrap (Linux)
+  is not on PATH, deep-claude exits non-zero rather than running unconfined.
 
 Environment:
-  OPENROUTER_API_KEY   default-path key (env, .env, or Keychain -s deep-router -a openrouter).
-  DEEP_CLAUDE_INHERIT  "1" => link your ~/.claude skills/plugins/agents/etc. + MCP servers
-                         into deep-claude (your Anthropic login is never imported).
-  CLAUDE_BIN           override the claude executable.
+  OPENROUTER_API_KEY         default-path key (env, .env, or Keychain -s deep-router -a openrouter).
+  DEEP_CLAUDE_INHERIT        "0" => skip linking ~/.claude config (default: "1" = inherit).
+  DEEP_CLAUDE_SHARE_SESSIONS "0" => don't symlink projects/ to ~/.claude/projects (default: "1").
+  DEEP_CLAUDE_SANDBOX        "1" => enable filesystem sandbox (default: "0").
+  DEEP_CLAUDE_SANDBOX_NET    "loopback" => loopback-only net in sandbox (Darwin only).
+  CLAUDE_BIN                 override the claude executable.
 EOF
 }
+
+# True when session/config inheritance is enabled (default ON).
+inherit_on() { [[ "${DEEP_CLAUDE_INHERIT:-1}" != "0" ]]; }
 
 # Load .env (KEY=value lines) into the environment.
 load_env() {
@@ -552,16 +578,54 @@ inherit_config() {
   fi
 }
 
+# Share transcript store with the real ~/.claude so sessions started in
+# deep-claude are visible from plain `claude --resume` and vice-versa.
+# Only projects/ is shared; auth, settings, and sessions/ stay isolated.
+# On first run, any existing isolated projects are migrated into the real store.
+# Opt out with DEEP_CLAUDE_SHARE_SESSIONS=0.
+share_sessions() {
+  local real="$HOME/.claude" dest="$STATE_DIR/home/.claude"
+  [[ -d "$real" ]] || return 0
+  mkdir -p "$dest" "$real/projects"
+  local src="$real/projects" dst="$dest/projects"
+  if [[ -L "$dst" ]]; then
+    ln -sfn "$src" "$dst"
+  elif [[ -e "$dst" ]]; then
+    # First migration: merge existing isolated transcripts into the shared store
+    # at FILE granularity (so a project dir present in BOTH homes keeps every
+    # transcript), never clobbering a real-home file, then replace with a symlink.
+    # File-level (not dir-level) is essential: session ids are unique, so distinct
+    # transcripts in a colliding project dir must all survive — a dir-level skip
+    # followed by rm -rf would silently delete them.
+    if [[ -d "$dst" ]]; then
+      local f rel tgt
+      while IFS= read -r -d '' f; do
+        rel="${f#"$dst"/}"; tgt="$src/$rel"
+        if [[ ! -e "$tgt" ]]; then mkdir -p "$(dirname "$tgt")"; mv "$f" "$tgt"; fi
+      done < <(find "$dst" -type f -print0 2>/dev/null)
+    fi
+    rm -rf "$dst"
+    ln -s "$src" "$dst"
+  else
+    ln -s "$src" "$dst"
+  fi
+  return 0
+}
+
 # Add the deep-claude statusline (live "direct vs openrouter" route indicator)
 # to the isolated settings.json. Bases off your real settings when inheriting
 # (copy + merge, never touching your file) and keeps your own statusline if you
-# already have one. Disable with DEEP_CLAUDE_STATUSLINE=0.
+# already have one. When inheriting, strips top-level model/apiKeyHelper/
+# awsAuthRefresh and all ANTHROPIC_* env keys so inherited settings can never
+# shadow routing — routing/tier env is overlaid last by write_auth_env +
+# write_model_env. Non-ANTHROPIC env keys (e.g. PERPLEXITY_API_KEY) are kept so
+# inherited MCP servers keep working. Disable with DEEP_CLAUDE_STATUSLINE=0.
 ensure_statusline() {
   [[ "${DEEP_CLAUDE_STATUSLINE:-1}" == "1" ]] || return 0
   command -v node >/dev/null 2>&1 || return 0
   local dest="$STATE_DIR/home/.claude/settings.json"
   local base=""
-  if [[ "${DEEP_CLAUDE_INHERIT:-}" == "1" && -f "$HOME/.claude/settings.json" ]]; then
+  if inherit_on && [[ -f "$HOME/.claude/settings.json" ]]; then
     base="$HOME/.claude/settings.json"
   elif [[ -f "$dest" && ! -L "$dest" ]]; then
     base="$dest"
@@ -571,9 +635,79 @@ ensure_statusline() {
   DC_DEST="$dest" DC_BASE="$base" DC_SCRIPT="$SCRIPT_DIR/deep-claude-statusline" node -e '
     const fs=require("fs");
     let s={}; try{ s=JSON.parse(fs.readFileSync(process.env.DC_BASE||process.env.DC_DEST,"utf8")); }catch(e){}
+    delete s.model;
+    delete s.apiKeyHelper;
+    delete s.awsAuthRefresh;
+    if(s.env){
+      const safe={};
+      for(const k of Object.keys(s.env)){
+        if(!k.startsWith("ANTHROPIC_")) safe[k]=s.env[k];
+      }
+      s.env=safe;
+    }
     if(!s.statusLine) s.statusLine={type:"command",command:process.env.DC_SCRIPT};
     fs.writeFileSync(process.env.DC_DEST, JSON.stringify(s,null,2));
   ' 2>/dev/null || true
+}
+
+# Persist the routing auth (base URL + token + key) into the isolated
+# settings.json `env` block. Claude Code applies a settings `env` to every
+# process that uses this config dir, so this is what keeps SUB-AGENTS, resumed
+# sessions, and any background/fleet spawn authenticated. The launch env we
+# export below only lives on the main process; a child that inherits a sanitized
+# env (or a fresh `claude --resume`) would otherwise see no credentials and drop
+# to `/login`. Re-written every launch because the proxy port is dynamic. In
+# OpenRouter mode the token is the literal "router" (no real secret on disk —
+# the upstream keys stay inside the proxy); in direct mode it's the endpoint key,
+# which only ever lands in the git-ignored isolated home.
+write_auth_env() {
+  command -v node >/dev/null 2>&1 || return 0
+  local dest="$STATE_DIR/home/.claude/settings.json"
+  mkdir -p "$(dirname "$dest")"
+  [[ -L "$dest" ]] && rm -f "$dest" # never write through a symlink into your real settings
+  DC_DEST="$dest" DC_URL="$1" DC_AUTH="$2" DC_KEY="$3" node -e '
+    const fs=require("fs");
+    let s={}; try{ s=JSON.parse(fs.readFileSync(process.env.DC_DEST,"utf8")); }catch(e){}
+    s.env=Object.assign({}, s.env, {
+      ANTHROPIC_BASE_URL: process.env.DC_URL,
+      ANTHROPIC_AUTH_TOKEN: process.env.DC_AUTH,
+      ANTHROPIC_API_KEY: process.env.DC_KEY,
+    });
+    fs.writeFileSync(process.env.DC_DEST, JSON.stringify(s,null,2));
+  ' 2>/dev/null || true
+}
+
+# Persist the 6 model-tier env vars into settings.json so sub-agents and
+# resumed sessions use the same model tiers as the main process. Also removes
+# any top-level `model` pin (which would shadow routing) and, in OpenRouter
+# mode, sets the gateway-discovery and disable-betas flags.
+# Signature: write_model_env <model> <opus> <sonnet> <haiku> <fable> <small_fast> <mode>
+write_model_env() {
+  command -v node >/dev/null 2>&1 || return 0
+  local dest="$STATE_DIR/home/.claude/settings.json"
+  mkdir -p "$(dirname "$dest")"
+  [[ -L "$dest" ]] && rm -f "$dest"
+  DC_DEST="$dest" \
+  DC_MODEL="$1" DC_OPUS="$2" DC_SONNET="$3" DC_HAIKU="$4" DC_FABLE="$5" DC_SMALL="$6" \
+  DC_MODE="$7" node -e '
+    const fs=require("fs");
+    let s={}; try{ s=JSON.parse(fs.readFileSync(process.env.DC_DEST,"utf8")); }catch(e){}
+    delete s.model;
+    s.env=Object.assign({}, s.env, {
+      ANTHROPIC_MODEL: process.env.DC_MODEL,
+      ANTHROPIC_DEFAULT_OPUS_MODEL: process.env.DC_OPUS,
+      ANTHROPIC_DEFAULT_SONNET_MODEL: process.env.DC_SONNET,
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: process.env.DC_HAIKU,
+      ANTHROPIC_DEFAULT_FABLE_MODEL: process.env.DC_FABLE,
+      ANTHROPIC_SMALL_FAST_MODEL: process.env.DC_SMALL,
+    });
+    if(process.env.DC_MODE==="openrouter"){
+      s.env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY="1";
+      s.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS="1";
+    }
+    fs.writeFileSync(process.env.DC_DEST, JSON.stringify(s,null,2));
+  ' 2>/dev/null || true
+  chmod 600 "$dest" 2>/dev/null || true
 }
 
 # Point Claude Code's state at our isolated home without touching $HOME (the
@@ -585,11 +719,55 @@ set_claude_state() {
   export XDG_CACHE_HOME="$STATE_DIR/cache"
   export XDG_DATA_HOME="$STATE_DIR/data"
   export XDG_STATE_HOME="$STATE_DIR/state"
-  # NB: use `if`, not `&& inherit_config` — a false `[[ ]]` as the function's
-  # last command would make set_claude_state return non-zero and, under set -e,
-  # abort the run for everyone who hasn't enabled inherit.
-  if [[ "${DEEP_CLAUDE_INHERIT:-}" == "1" ]]; then inherit_config; fi
+  # NB: use `if`, not `&& ...` — a false branch as the function's last command
+  # would make set_claude_state return non-zero and, under set -e, abort runs.
+  if [[ "${DEEP_CLAUDE_SHARE_SESSIONS:-1}" == "1" ]]; then share_sessions; fi
+  if inherit_on; then inherit_config; fi
   ensure_statusline
+}
+
+# Global sandbox prefix array — populated by build_sandbox_prefix when
+# DEEP_CLAUDE_SANDBOX=1; empty otherwise (expands to nothing in launch lines).
+SANDBOX_PREFIX=()
+
+# Build the OS-specific sandbox prefix (sets SANDBOX_PREFIX). Fails closed:
+# if --sandbox was requested but the mechanism is unavailable, prints an error
+# and exits non-zero — never silently runs unconfined.
+# Usage: build_sandbox_prefix <proxy-port|"">
+build_sandbox_prefix() {
+  local port="${1:-}"
+  if [[ "${DEEP_CLAUDE_SANDBOX:-0}" != "1" ]]; then
+    SANDBOX_PREFIX=()
+    return 0
+  fi
+  local os; os="$(uname -s)"
+  case "$os" in
+    Darwin)
+      command -v sandbox-exec >/dev/null 2>&1 || { echo "deep-claude: --sandbox requested but sandbox-exec not found on PATH" >&2; exit 1; }
+      # Choose network stanza in bash (no SBPL conditionals).
+      local net_stanza
+      if [[ "${DEEP_CLAUDE_SANDBOX_NET:-}" == "loopback" ]]; then
+        net_stanza='(allow network-bind (local ip "localhost:*"))
+(allow network-outbound (remote ip "localhost:*"))'
+      else
+        net_stanza='(allow network*)'
+      fi
+      # Generate the seatbelt profile with real absolute paths substituted.
+      local sb="$STATE_DIR/seatbelt.sb"
+      mkdir -p "$STATE_DIR"
+      printf '(version 1)\n(deny default)\n(allow file-read*)\n(allow process-fork)\n(allow process-exec*)\n(allow signal (target children))\n(allow sysctl-read)\n(allow mach-lookup)\n(allow file-write*\n  (subpath "%s")\n  (subpath "%s")\n  (subpath "/private/tmp")\n  (subpath "/private/var/folders")\n  (subpath "/tmp")\n  (subpath "%s/.npm")\n  (subpath "%s/.cache")\n  (subpath "%s/Library/Caches")\n  (literal "/dev/null") (literal "/dev/stdout") (literal "/dev/stderr")\n  (regex #"^/dev/tty"))\n%s\n(allow network-outbound (remote unix-socket))\n' \
+        "$PWD" "$STATE_DIR" "$HOME" "$HOME" "$HOME" "$net_stanza" >"$sb"
+      SANDBOX_PREFIX=(sandbox-exec -f "$sb")
+      ;;
+    Linux)
+      command -v bwrap >/dev/null 2>&1 || { echo "deep-claude: --sandbox requested but bwrap not found on PATH" >&2; exit 1; }
+      SANDBOX_PREFIX=(bwrap --dev-bind / / --bind "$PWD" "$PWD" --bind "$STATE_DIR" "$STATE_DIR" --bind /tmp /tmp --share-net)
+      ;;
+    *)
+      echo "deep-claude: --sandbox is not supported on $os" >&2; exit 1
+      ;;
+  esac
+  return 0
 }
 
 # --- run: OpenRouter (default) ----------------------------------------------
@@ -641,6 +819,8 @@ run_openrouter() {
   export ANTHROPIC_AUTH_TOKEN="router"
   export ANTHROPIC_API_KEY=""
   export ANTHROPIC_MODEL="$model"
+  # Persist the auth so sub-agents / resumed sessions stay logged in (see fn).
+  write_auth_env "http://$host:$port" "router" ""
   # Map the switch slots (set by `deep-claude pick`) so /model can flip between
   # them in-session. An unset slot falls back to the current model.
   local s_opus s_sonnet s_haiku s_fable
@@ -653,8 +833,11 @@ run_openrouter() {
   export ANTHROPIC_SMALL_FAST_MODEL="${s_haiku:-$model}"
   export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY="1"
   export CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS="1"
+  # Persist model tiers so sub-agents / resumed sessions use the same models.
+  write_model_env "$model" "${s_opus:-$model}" "${s_sonnet:-$model}" "${s_haiku:-$model}" "${s_fable:-$model}" "${s_haiku:-$model}" openrouter
 
-  if ((${#args[@]})); then "${CLAUDE_BIN:-claude}" --model "$model" "${args[@]}"; else "${CLAUDE_BIN:-claude}" --model "$model"; fi
+  build_sandbox_prefix "$port"
+  if ((${#args[@]})); then "${SANDBOX_PREFIX[@]+"${SANDBOX_PREFIX[@]}"}" "${CLAUDE_BIN:-claude}" --model "$model" "${args[@]}"; else "${SANDBOX_PREFIX[@]+"${SANDBOX_PREFIX[@]}"}" "${CLAUDE_BIN:-claude}" --model "$model"; fi
   exit $?
 }
 
@@ -687,6 +870,8 @@ run_endpoint() {
   export ANTHROPIC_AUTH_TOKEN="${key:-none}"
   export ANTHROPIC_API_KEY="${key:-none}"
   export ANTHROPIC_MODEL="$model"
+  # Persist the auth so sub-agents / resumed sessions stay logged in (see fn).
+  write_auth_env "$url" "${key:-none}" "${key:-none}"
 
   # Map the endpoint's models onto Claude Code's /model switch slots so you can
   # flip between them in-session. Prefer the explicit per-slot assignments set in
@@ -694,6 +879,7 @@ run_endpoint() {
   # order (opus/sonnet/haiku/fable). Any unfilled slot falls back to the launch
   # model. (ANTHROPIC_SMALL_FAST_MODEL is the deprecated alias of HAIKU; we still
   # set it so older Claude Code builds keep working.)
+  local t_opus="$model" t_sonnet="$model" t_haiku="$model" t_fable="$model"
   if [[ -n "$models" ]]; then
     local ms sl_o sl_s sl_h sl_f
     IFS=',' read -ra ms <<<"$models"
@@ -701,22 +887,24 @@ run_endpoint() {
       sl_o="$(env_get "DEEP_EP_SLOT_OPUS_$slug")"; sl_s="$(env_get "DEEP_EP_SLOT_SONNET_$slug")"
       sl_h="$(env_get "DEEP_EP_SLOT_HAIKU_$slug")"; sl_f="$(env_get "DEEP_EP_SLOT_FABLE_$slug")"
     fi
-    if [[ -n "$sl_o$sl_s$sl_h$sl_f" ]]; then
-      export ANTHROPIC_DEFAULT_OPUS_MODEL="${sl_o:-$model}"
-      export ANTHROPIC_DEFAULT_SONNET_MODEL="${sl_s:-$model}"
-      export ANTHROPIC_DEFAULT_HAIKU_MODEL="${sl_h:-$model}"
-      export ANTHROPIC_DEFAULT_FABLE_MODEL="${sl_f:-$model}"
-      export ANTHROPIC_SMALL_FAST_MODEL="${sl_h:-$model}"
+    if [[ -n "${sl_o:-}${sl_s:-}${sl_h:-}${sl_f:-}" ]]; then
+      t_opus="${sl_o:-$model}"; t_sonnet="${sl_s:-$model}"
+      t_haiku="${sl_h:-$model}"; t_fable="${sl_f:-$model}"
     else
-      export ANTHROPIC_DEFAULT_OPUS_MODEL="${ms[0]:-$model}"
-      export ANTHROPIC_DEFAULT_SONNET_MODEL="${ms[1]:-$model}"
-      export ANTHROPIC_DEFAULT_HAIKU_MODEL="${ms[2]:-$model}"
-      export ANTHROPIC_DEFAULT_FABLE_MODEL="${ms[3]:-$model}"
-      export ANTHROPIC_SMALL_FAST_MODEL="${ms[2]:-$model}"
+      t_opus="${ms[0]:-$model}"; t_sonnet="${ms[1]:-$model}"
+      t_haiku="${ms[2]:-$model}"; t_fable="${ms[3]:-$model}"
     fi
   fi
+  export ANTHROPIC_DEFAULT_OPUS_MODEL="$t_opus"
+  export ANTHROPIC_DEFAULT_SONNET_MODEL="$t_sonnet"
+  export ANTHROPIC_DEFAULT_HAIKU_MODEL="$t_haiku"
+  export ANTHROPIC_DEFAULT_FABLE_MODEL="$t_fable"
+  export ANTHROPIC_SMALL_FAST_MODEL="$t_haiku"
+  # Persist model tiers so sub-agents / resumed sessions use the same models.
+  write_model_env "$model" "$t_opus" "$t_sonnet" "$t_haiku" "$t_fable" "$t_haiku" endpoint
 
-  if ((${#args[@]})); then exec "${CLAUDE_BIN:-claude}" --model "$model" "${args[@]}"; else exec "${CLAUDE_BIN:-claude}" --model "$model"; fi
+  build_sandbox_prefix ""
+  if ((${#args[@]})); then exec "${SANDBOX_PREFIX[@]+"${SANDBOX_PREFIX[@]}"}" "${CLAUDE_BIN:-claude}" --model "$model" "${args[@]}"; else exec "${SANDBOX_PREFIX[@]+"${SANDBOX_PREFIX[@]}"}" "${CLAUDE_BIN:-claude}" --model "$model"; fi
 }
 
 # --- run dispatch -----------------------------------------------------------
@@ -738,6 +926,10 @@ run_main() {
       --api-key-env=*) api_key_env="${1#--api-key-env=}"; shift ;;
       --inherit) export DEEP_CLAUDE_INHERIT=1; shift ;;
       --no-inherit) export DEEP_CLAUDE_INHERIT=0; shift ;;
+      --share-sessions) export DEEP_CLAUDE_SHARE_SESSIONS=1; shift ;;
+      --no-share-sessions) export DEEP_CLAUDE_SHARE_SESSIONS=0; shift ;;
+      --sandbox) export DEEP_CLAUDE_SANDBOX=1; shift ;;
+      --no-sandbox) export DEEP_CLAUDE_SANDBOX=0; shift ;;
       *) args+=("$1"); shift ;;
     esac
   done

@@ -53,8 +53,9 @@ swap the brain.
   key itself lives here too, so one screen manages every key. `⌃S` saves everything.
 - **Real multi-model workflows.** A sub-agent's `model:` accepts a full model id, so one workflow can
   run many models at once — the orchestrator on one, sub-agents pinned to others (proven end-to-end).
-- **Keep your setup.** `--inherit` brings your existing skills, agents, workflows, plugins, hooks, and
-  MCP servers along — without importing your Anthropic login. See
+- **Keep your setup.** Inherit is **on by default** — your existing skills, agents, workflows,
+  plugins, hooks, and MCP servers come along automatically, without importing your Anthropic login.
+  Use `--no-inherit` to run fully isolated. See
   [Use your existing Claude setup](#use-your-existing-claude-setup-skills-plugins-mcp-).
 - **Zero contamination.** Session history, projects, MCP config, and `~/.claude.json` live in a
   private state dir — your normal Claude Code setup is untouched, and `$HOME` is left alone so the
@@ -74,7 +75,7 @@ swap the brain.
 | `deep-claude models …`        | Curate the model set non-interactively.                      |
 | `deep-claude endpoints …`     | Manage personal (non-OpenRouter) endpoints.                  |
 | `deep-claude --endpoint NAME` | Run on a saved personal endpoint.                            |
-| `deep-claude --inherit`       | Bring in your real `~/.claude` skills/plugins/MCP/etc.       |
+| `deep-claude --no-inherit`    | Run without linking your real `~/.claude` (default: inherit ON). |
 
 ## Contents
 
@@ -217,15 +218,39 @@ Everything other than `deep-claude`'s own flags passes straight through to `clau
 
 ### Use your existing Claude setup (skills, plugins, MCP, …)
 
-By default deep-claude runs in an isolated config, so it doesn't see your real `~/.claude`. To bring your **skills, agents, workflows, rules, hooks, plugins, `settings.json`, `CLAUDE.md`, and MCP servers** into the session:
+Config inheritance is **ON by default** — your `~/.claude` skills, agents, workflows, rules, hooks, plugins, `settings.json`, `CLAUDE.md`, and MCP servers are linked into the isolated home every launch without any flags. Your Anthropic login and credentials are never imported. To opt out:
 
 ```bash
-deep-claude --inherit            # one run
+deep-claude --no-inherit            # one run
 # …or persist it:
-echo 'DEEP_CLAUDE_INHERIT="1"' >> .env
+echo 'DEEP_CLAUDE_INHERIT="0"' >> .env
 ```
 
-It symlinks those config dirs/files and merges your MCP servers (from `~/.claude.json`) into the isolated home — but **never imports your Anthropic login or chat history**, so it can't conflict with the OpenRouter routing. Your real `~/.claude` is only read; deep-claude's own session history stays separate.
+When inheriting `settings.json`, deep-claude strips any top-level `model` pin, `apiKeyHelper`, `awsAuthRefresh`, and all `ANTHROPIC_*` env keys from the inherited file so they can never shadow routing — non-Anthropic env keys (e.g. `PERPLEXITY_API_KEY`) are preserved so inherited MCP servers keep working. Routing env is then overlaid last by deep-claude, so routing always wins.
+
+### Session sharing with `~/.claude` (ON by default)
+
+Sessions started in deep-claude are **resumable with plain `claude --resume`** and vice-versa. The transcript store (`projects/`) in the isolated home is symlinked to `~/.claude/projects/` on every launch. On first run, any existing isolated transcripts are migrated into the shared store (never clobbering real-home files). Auth files (`settings.json`, `.credentials.json`), `sessions/`, and `file-history/` stay isolated.
+
+To opt out:
+
+```bash
+deep-claude --no-share-sessions     # one run
+# …or persist it:
+echo 'DEEP_CLAUDE_SHARE_SESSIONS="0"' >> .env
+```
+
+### Filesystem sandbox (opt-in)
+
+Confine Claude Code's writes to your working directory, deep-claude's state dir, and `/tmp` — reads, exec, and network are unrestricted:
+
+```bash
+deep-claude --sandbox -p "refactor this"     # enable for this run
+DEEP_CLAUDE_SANDBOX=1 deep-claude            # or via env
+DEEP_CLAUDE_SANDBOX_NET=loopback deep-claude --sandbox    # loopback-only net (macOS)
+```
+
+Uses `sandbox-exec` on macOS, `bwrap` on Linux. **Fail-closed**: if `--sandbox` is requested but the mechanism is not on PATH, deep-claude exits non-zero and never runs unconfined. Disable explicitly with `--no-sandbox`.
 
 > **Non-Claude reasoning models:** OpenRouter's Anthropic skin emits (out-of-order) `redacted_thinking`
 > blocks for models like Gemini, which would otherwise make Claude Code show an empty response. The
