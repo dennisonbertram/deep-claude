@@ -1,0 +1,29 @@
+name: test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test.sh (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # ubuntu exercises the Linux paths (sandbox tests self-skip via uname);
+        # macos additionally runs the real sandbox-exec seatbelt enforce smoke.
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Run the test suite
+        run: bash test.sh

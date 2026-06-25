@@ -5,6 +5,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-06-25
+
 ### Added
 - **Model-tier persistence into `settings.json`.** The 6 model-tier env vars
   (`ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU,FABLE}_MODEL`,
@@ -144,3 +146,7 @@ All notable changes to this project are documented here. The format is based on
   bailed out before fetching when an endpoint had no key, even though the model
   fetch supports unauthenticated requests. It now attempts the fetch and only
   prompts for a key if that attempt fails.
+
+[Unreleased]: https://github.com/dennisonbertram/deep-claude/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/dennisonbertram/deep-claude/compare/v1.0.0...v1.1.0
+[1.0.0]: https://github.com/dennisonbertram/deep-claude/releases/tag/v1.0.0
