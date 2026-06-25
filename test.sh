@@ -93,9 +93,14 @@ DEEP_CLAUDE_ENV_FILE="$tmpenv" ./bin/deep-claude models add 'google/gemma-4-31b-
 rm -f "$tmpenv"
 
 # --- default (OpenRouter): boots the proxy, health-checks, then execs claude. --
-or_boot="$(CLAUDE_BIN=/bin/echo DEEP_CLAUDE_ENV_FILE=/dev/null OPENROUTER_API_KEY=k ROUTER_PORT=8911 \
+# Provide ROUTER_MODELS so the first-run setup wizard is skipped — otherwise the
+# picker TUI runs and (on a non-TTY where it still draws, e.g. Linux CI) pollutes
+# the captured stdout.
+tmpenv="$(mktemp)"; printf 'ROUTER_MODELS="google/gemini-3.5-flash"\n' >"$tmpenv"
+or_boot="$(CLAUDE_BIN=/bin/echo DEEP_CLAUDE_ENV_FILE="$tmpenv" OPENROUTER_API_KEY=k ROUTER_PORT=8911 \
   ./bin/deep-claude --model google/gemini-3.5-flash -p hi 2>/dev/null)"
 [[ "$or_boot" == "--model google/gemini-3.5-flash -p hi" ]]
+rm -f "$tmpenv"
 
 # --- sub-agents / resumed sessions stay logged in. The launch auth only lives on
 #     the main process env; a claude that doesn't inherit it (a sub-agent spawned
